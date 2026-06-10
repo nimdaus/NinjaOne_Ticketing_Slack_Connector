@@ -1,0 +1,92 @@
+{% extends "base.html" %}
+{% block title %}Commands — Eng Assist Admin{% endblock %}
+
+{% block content %}
+
+{% if setup_done %}
+<div class="alert alert-success">✓ NinjaOne credentials saved. The bot will use the new credentials immediately.</div>
+{% endif %}
+{% if slack_done %}
+<div class="alert alert-success">✓ Slack tokens saved. The bot is reconnecting to Slack now.</div>
+{% endif %}
+{% if saved %}
+<div class="alert alert-success">✓ Command <strong>{{ saved }}</strong> saved.</div>
+{% endif %}
+{% if deleted %}
+<div class="alert alert-success">Command <strong>{{ deleted }}</strong> deleted.</div>
+{% endif %}
+{% if error %}
+<div class="alert alert-error">{{ error }}</div>
+{% endif %}
+
+{% if not slack_configured %}
+<div class="alert alert-error" style="display:flex;align-items:center;justify-content:space-between;gap:1rem;">
+  <span>Slack tokens are not configured. The bot cannot receive commands until setup is complete.</span>
+  <a href="/slack" class="btn btn-primary btn-sm" style="white-space:nowrap">Configure Slack &rarr;</a>
+</div>
+{% endif %}
+{% if not ninja_configured %}
+<div class="alert alert-error" style="display:flex;align-items:center;justify-content:space-between;gap:1rem;">
+  <span>NinjaOne credentials are not configured. Commands will not work until setup is complete.</span>
+  <a href="/setup" class="btn btn-primary btn-sm" style="white-space:nowrap">Run setup &rarr;</a>
+</div>
+{% endif %}
+
+<div class="card">
+  <div class="page-header">
+    <h2>Registered commands</h2>
+    <a href="/command/new" class="btn btn-primary">+ Add command</a>
+  </div>
+
+  {% if commands %}
+  <table>
+    <thead>
+      <tr>
+        <th>Command</th>
+        <th>NinjaOne form</th>
+        <th>Organisation</th>
+        <th>Subject template</th>
+        <th></th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for cmd, entry in commands.items() %}
+      <tr>
+        <td><span class="mono">{{ cmd }}</span></td>
+        <td>
+          {{ entry.ticketFormName or '' }}
+          <span class="muted mono" style="font-size:.75rem"> #{{ entry.ticketFormId }}</span>
+        </td>
+        <td>
+          {{ entry.clientName or '' }}
+          <span class="muted mono" style="font-size:.75rem"> #{{ entry.clientId }}</span>
+        </td>
+        <td>
+          {% if entry.defaultSubject %}
+            <span class="mono" style="font-size:.8rem">{{ entry.defaultSubject }}</span>
+          {% else %}
+            <span class="muted">auto</span>
+          {% endif %}
+        </td>
+        <td>
+          <div class="actions">
+            <a href="/command/{{ cmd | urlencode }}/edit" class="btn btn-secondary btn-sm">Edit</a>
+            <form method="post" action="/command/{{ cmd | urlencode }}/delete"
+                  onsubmit="return confirm('Delete {{ cmd }}?')">
+              <button type="submit" class="btn btn-danger btn-sm">Delete</button>
+            </form>
+          </div>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <div class="empty">
+    <p>No commands registered yet.</p>
+    <a href="/command/new" class="btn btn-primary">Add your first command</a>
+  </div>
+  {% endif %}
+</div>
+
+{% endblock %}

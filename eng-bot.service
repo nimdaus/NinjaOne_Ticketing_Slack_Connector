@@ -1,0 +1,23 @@
+[Unit]
+Description=Engineering Assistance Slack Bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=engbot
+Group=engbot
+WorkingDirectory=/opt/eng-bot
+EnvironmentFile=/opt/eng-bot/.env
+ExecStart=/opt/eng-bot/venv/bin/python bot.py
+Restart=on-failure
+RestartSec=10
+Environment=PYTHONUNBUFFERED=1
+
+# Hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/opt/eng-bot
+
+[Install]
+WantedBy=multi-user.target

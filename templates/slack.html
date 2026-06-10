@@ -1,0 +1,74 @@
+{% extends "base.html" %}
+{% block title %}Slack Setup — Eng Assist Admin{% endblock %}
+
+{% block content %}
+
+{% if configured %}
+<div class="alert alert-success">Slack tokens are already configured. Re-enter below to update them.</div>
+{% endif %}
+
+{% if error %}
+<div class="alert alert-error">{{ error }}</div>
+{% endif %}
+
+<div class="alert alert-info" style="margin-bottom:1rem;">
+  <strong>Where to find these tokens</strong>
+  <ol style="margin:.5rem 0 0 1.4rem;font-size:.875rem;line-height:1.8;">
+    <li>
+      <a href="https://api.slack.com/apps" target="_blank" rel="noopener">api.slack.com/apps</a>
+      → select your app
+    </li>
+    <li>
+      <strong>Settings → Socket Mode</strong> → enable, create an app-level token with scope
+      <code>connections:write</code> → copy the <code>xapp-…</code> token
+    </li>
+    <li>
+      <strong>Features → OAuth & Permissions → Bot Token Scopes</strong> — ensure
+      <code>commands</code>, <code>chat:write</code>, <code>users:read</code>,
+      <code>users:read.email</code> are added
+    </li>
+    <li>
+      <strong>Install App</strong> → copy the <code>xoxb-…</code> bot token
+    </li>
+  </ol>
+</div>
+
+<div class="card">
+  <div class="page-header">
+    <h2>Slack Tokens</h2>
+    <a href="/" class="btn btn-secondary btn-sm">Cancel</a>
+  </div>
+
+  <p style="margin-bottom:1.25rem;color:#4b5563;font-size:.9rem;">
+    Tokens are stored encrypted on the server (if <code>ENCRYPTION_KEY</code> is set) and never
+    returned to your browser after saving. The bot reconnects to Slack automatically after saving —
+    no container restart required.
+  </p>
+
+  <form method="post" action="/slack" class="form-grid">
+    <div class="form-group">
+      <label for="bot_token">
+        Bot token
+        <span class="hint">starts with xoxb-</span>
+      </label>
+      <input type="password" id="bot_token" name="bot_token"
+             placeholder="xoxb-…" required autocomplete="off">
+    </div>
+
+    <div class="form-group">
+      <label for="app_token">
+        App-level token
+        <span class="hint">starts with xapp- — used for Socket Mode</span>
+      </label>
+      <input type="password" id="app_token" name="app_token"
+             placeholder="xapp-…" required autocomplete="off">
+    </div>
+
+    <div class="form-actions">
+      <button type="submit" class="btn btn-primary">Save tokens</button>
+      <a href="/" class="btn btn-secondary">Cancel</a>
+    </div>
+  </form>
+</div>
+
+{% endblock %}

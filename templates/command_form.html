@@ -1,0 +1,119 @@
+{% extends "base.html" %}
+{% block title %}{{ "Edit" if editing else "Add" }} command — Eng Assist Admin{% endblock %}
+
+{% block content %}
+
+<div class="card">
+  <div class="page-header">
+    <h2>{{ "Edit" if editing else "Add" }} command</h2>
+    <a href="/" class="btn btn-secondary">← Back</a>
+  </div>
+
+  {% if error %}
+  <div class="alert alert-error" style="margin-bottom:1.25rem">{{ error }}</div>
+  {% endif %}
+
+  <form method="post" action="{{ action }}">
+    <div class="form-grid">
+
+      <!-- Slash command -->
+      <div class="form-group">
+        <label for="command">
+          Slash command
+          <span class="hint">must match a command registered in your Slack app</span>
+        </label>
+        <input
+          type="text"
+          id="command"
+          name="command"
+          value="{{ cmd }}"
+          placeholder="/request-assist"
+          {% if editing %}readonly{% endif %}
+          required
+        >
+      </div>
+
+      <!-- NinjaOne form -->
+      <div class="form-group">
+        <label for="ticket_form_id">NinjaOne ticket form</label>
+        {% if forms %}
+        <select id="ticket_form_id" name="ticket_form_id" required
+                onchange="syncFormName(this)">
+          <option value="">— select a form —</option>
+          {% for f in forms %}
+          <option
+            value="{{ f.id }}"
+            data-name="{{ f.name or f.title or '' }}"
+            {% if entry.ticketFormId == f.id %}selected{% endif %}
+          >{{ f.name or f.title or f.id }}</option>
+          {% endfor %}
+        </select>
+        {% else %}
+        <input type="text" placeholder="Could not load forms from NinjaOne" disabled>
+        {% endif %}
+        <!-- Hidden field carries the human-readable name for display in the table -->
+        <input type="hidden" id="ticket_form_name" name="ticket_form_name"
+               value="{{ entry.ticketFormName or '' }}">
+      </div>
+
+      <!-- Organisation -->
+      <div class="form-group">
+        <label for="client_id">Organisation</label>
+        {% if orgs %}
+        <select id="client_id" name="client_id" required
+                onchange="syncClientName(this)">
+          <option value="">— select an organisation —</option>
+          {% for o in orgs %}
+          <option
+            value="{{ o.id }}"
+            data-name="{{ o.name or '' }}"
+            {% if entry.clientId == o.id %}selected{% endif %}
+          >{{ o.name or o.id }}</option>
+          {% endfor %}
+        </select>
+        {% else %}
+        <input type="text" placeholder="Could not load organisations from NinjaOne" disabled>
+        {% endif %}
+        <input type="hidden" id="client_name" name="client_name"
+               value="{{ entry.clientName or '' }}">
+      </div>
+
+      <!-- Default subject -->
+      <div class="form-group">
+        <label for="default_subject">
+          Default subject template
+          <span class="hint">optional — use {Field Name} placeholders, e.g. [Eng Assist] {Root Problem}</span>
+        </label>
+        <input
+          type="text"
+          id="default_subject"
+          name="default_subject"
+          value="{{ entry.defaultSubject or '' }}"
+          placeholder="[Eng Assist] {Root Problem}"
+        >
+      </div>
+
+    </div><!-- /.form-grid -->
+
+    <div class="form-actions">
+      <button type="submit" class="btn btn-primary">
+        {{ "Save changes" if editing else "Add command" }}
+      </button>
+      <a href="/" class="btn btn-secondary">Cancel</a>
+    </div>
+  </form>
+</div>
+
+<script>
+  // Keep the hidden name fields in sync when the user picks a different option
+  function syncFormName(sel) {
+    const opt = sel.options[sel.selectedIndex];
+    document.getElementById('ticket_form_name').value = opt.dataset.name || '';
+  }
+  function syncClientName(sel) {
+    const opt = sel.options[sel.selectedIndex];
+    document.getElementById('client_name').value = opt.dataset.name || '';
+  }
+</script>
+
+{% endblock %}
