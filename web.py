@@ -2,7 +2,7 @@
 Admin web UI — FastAPI + Jinja2.
 
 Manages form-command mappings, NinjaOne credential setup, and Slack tokens.
-Protected by HTTP Basic Auth; set ADMIN_PASSWORD in docker-compose.yml.
+Access control is handled by the upstream boundary (e.g. Cloudflare Access).
 
 Routes
 ------
@@ -26,9 +26,8 @@ from pathlib import Path
 from urllib.parse import quote, unquote
 
 import httpx
-from fastapi import Depends, FastAPI, Form, HTTPException, Request
+from fastapi import FastAPI, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
-from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from fastapi.templating import Jinja2Templates
 
 from registry import load_registry, save_registry
@@ -39,30 +38,11 @@ from ninja_auth import (
     is_slack_configured, load_slack_config, save_slack_config,
 )
 
-ADMIN_PASSWORD  = os.environ.get("ADMIN_PASSWORD", "changeme")
-ADMIN_BASE_URL  = os.environ.get("ADMIN_BASE_URL", "").rstrip("/")
+ADMIN_BASE_URL = os.environ.get("ADMIN_BASE_URL", "").rstrip("/")
 
-_security  = HTTPBasic()
 _templates = Jinja2Templates(directory=Path(__file__).parent / "templates")
 
 admin_app = FastAPI(title="Eng Assist Admin", docs_url=None, redoc_url=None)
-
-
-# ---------------------------------------------------------------------------
-# Auth
-# ---------------------------------------------------------------------------
-
-def _require_auth(credentials: HTTPBasicCredentials = Depends(_security)) -> str:
-    ok = secrets.compare_digest(
-        credentials.password.encode(), ADMIN_PASSWORD.encode()
-    )
-    if not ok:
-        raise HTTPException(
-            status_code=401,
-            headers={"WWW-Authenticate": 'Basic realm="Eng Assist Admin"'},
-            detail="Incorrect password",
-        )
-    return credentials.username
 
 
 # ---------------------------------------------------------------------------
@@ -146,6 +126,48 @@ async def _fetch_orgs() -> list[dict]:
 
 
 # ---------------------------------------------------------------------------
+# Command registry helpers
+# ---------------------------------------------------------------------------
+
+def _entry_to_list(raw) -> list[dict]:
+    """Normalise a registry entry to a list regardless of whether it is a
+    single dict (legacy) or already a list (multi-form)."""
+    return raw if isinstance(raw, list) else [raw]
+
+
+async def _parse_form_entries(form) -> list[dict]:
+    """Build a list of form-entry dicts from indexed POST fields.
+
+    Expected field names: label_N, ticket_form_id_N, ticket_form_name_N,
+    client_id_N, client_name_N, default_subject_N  (N = 0-based index).
+    entry_count controls how many indices are read.
+    """
+    count = max(1, int(form.get("entry_count") or "1"))
+    entries = []
+    for i in range(count):
+        try:
+            fid = int(form.get(f"ticket_form_id_{i}") or 0)
+        except (ValueError, TypeError):
+            fid = 0
+        try:
+            cid = int(form.get(f"client_id_{i}") or 0)
+        except (ValueError, TypeError):
+            cid = 0
+        entry: dict = {
+            "ticketFormId":   fid,
+            "ticketFormName": (form.get(f"ticket_form_name_{i}") or ""),
+            "clientId":       cid,
+            "clientName":     (form.get(f"client_name_{i}") or ""),
+            "defaultSubject": (form.get(f"default_subject_{i}") or "").strip(),
+        }
+        label = (form.get(f"label_{i}") or "").strip()
+        if label:
+            entry["label"] = label
+        entries.append(entry)
+    return entries
+
+
+# ---------------------------------------------------------------------------
 # Routes — command management
 # ---------------------------------------------------------------------------
 
@@ -157,7 +179,6 @@ async def index(
     error: str = "",
     setup: str = "",
     slack: str = "",
-    _user: str = Depends(_require_auth),
 ):
     registry = load_registry()
     commands = registry.get("commands", {})
@@ -177,7 +198,6 @@ async def index(
 async def new_command_form(
     request: Request,
     error: str = "",
-    _user: str = Depends(_require_auth),
 ):
     if not is_configured():
         return RedirectResponse("/setup", status_code=303)
@@ -189,38 +209,26 @@ async def new_command_form(
         error = f"Could not load NinjaOne data: {exc}"
 
     return _templates.TemplateResponse(request, "command_form.html", {
-        "action":   "/command/new",
-        "editing":  False,
-        "cmd":      "",
-        "entry":    {},
-        "forms":    forms,
-        "orgs":     orgs,
-        "error":    error,
+        "action":  "/command/new",
+        "editing": False,
+        "cmd":     "",
+        "entries": [{}],
+        "forms":   forms,
+        "orgs":    orgs,
+        "error":   error,
     })
 
 
 @admin_app.post("/command/new")
-async def new_command_save(
-    command:          str = Form(...),
-    ticket_form_id:   int = Form(...),
-    ticket_form_name: str = Form(""),
-    client_id:        int = Form(...),
-    client_name:      str = Form(""),
-    default_subject:  str = Form(""),
-    _user: str = Depends(_require_auth),
-):
-    cmd = command.strip()
+async def new_command_save(request: Request):
+    form = await request.form()
+    cmd = (form.get("command") or "").strip()
     if not cmd.startswith("/"):
         cmd = "/" + cmd
 
+    entries = await _parse_form_entries(form)
     registry = load_registry()
-    registry.setdefault("commands", {})[cmd] = {
-        "ticketFormId":   ticket_form_id,
-        "ticketFormName": ticket_form_name,
-        "clientId":       client_id,
-        "clientName":     client_name,
-        "defaultSubject": default_subject.strip(),
-    }
+    registry.setdefault("commands", {})[cmd] = entries if len(entries) > 1 else entries[0]
     save_registry(registry)
     return RedirectResponse(f"/?saved={quote(cmd)}", status_code=303)
 
@@ -230,12 +238,11 @@ async def edit_command_form(
     request: Request,
     cmd: str,
     error: str = "",
-    _user: str = Depends(_require_auth),
 ):
     cmd = unquote(cmd)
     registry = load_registry()
-    entry = registry.get("commands", {}).get(cmd)
-    if entry is None:
+    raw = registry.get("commands", {}).get(cmd)
+    if raw is None:
         raise HTTPException(status_code=404, detail=f"Command {cmd!r} not found")
 
     try:
@@ -245,38 +252,26 @@ async def edit_command_form(
         error = f"Could not load NinjaOne data: {exc}"
 
     return _templates.TemplateResponse(request, "command_form.html", {
-        "action":   f"/command/{quote(cmd, safe='')}/edit",
-        "editing":  True,
-        "cmd":      cmd,
-        "entry":    entry,
-        "forms":    forms,
-        "orgs":     orgs,
-        "error":    error,
+        "action":  f"/command/{quote(cmd, safe='')}/edit",
+        "editing": True,
+        "cmd":     cmd,
+        "entries": _entry_to_list(raw),
+        "forms":   forms,
+        "orgs":    orgs,
+        "error":   error,
     })
 
 
 @admin_app.post("/command/{cmd:path}/edit")
-async def edit_command_save(
-    cmd: str,
-    ticket_form_id:   int = Form(...),
-    ticket_form_name: str = Form(""),
-    client_id:        int = Form(...),
-    client_name:      str = Form(""),
-    default_subject:  str = Form(""),
-    _user: str = Depends(_require_auth),
-):
+async def edit_command_save(cmd: str, request: Request):
     cmd = unquote(cmd)
     registry = load_registry()
     if cmd not in registry.get("commands", {}):
         raise HTTPException(status_code=404, detail=f"Command {cmd!r} not found")
 
-    registry["commands"][cmd] = {
-        "ticketFormId":   ticket_form_id,
-        "ticketFormName": ticket_form_name,
-        "clientId":       client_id,
-        "clientName":     client_name,
-        "defaultSubject": default_subject.strip(),
-    }
+    form    = await request.form()
+    entries = await _parse_form_entries(form)
+    registry["commands"][cmd] = entries if len(entries) > 1 else entries[0]
     save_registry(registry)
     return RedirectResponse(f"/?saved={quote(cmd)}", status_code=303)
 
@@ -284,7 +279,6 @@ async def edit_command_save(
 @admin_app.post("/command/{cmd:path}/delete")
 async def delete_command(
     cmd: str,
-    _user: str = Depends(_require_auth),
 ):
     cmd = unquote(cmd)
     registry = load_registry()
@@ -301,7 +295,6 @@ async def delete_command(
 async def setup_page(
     request: Request,
     error: str = "",
-    _user: str = Depends(_require_auth),
 ):
     return _templates.TemplateResponse(request, "setup.html", {
         "configured":   is_configured(),
@@ -316,7 +309,6 @@ async def setup_start(
     api_base:      str = Form(...),
     client_id:     str = Form(...),
     client_secret: str = Form(...),
-    _user: str = Depends(_require_auth),
 ):
     api_base     = api_base.rstrip("/")
     redirect_uri = _callback_url(request)
@@ -435,7 +427,6 @@ async def oauth_callback(request: Request):
 async def slack_page(
     request: Request,
     error: str = "",
-    _user: str = Depends(_require_auth),
 ):
     cfg = load_slack_config()
     return _templates.TemplateResponse(request, "slack.html", {
@@ -450,7 +441,6 @@ async def slack_page(
 async def slack_save(
     bot_token: str = Form(...),
     app_token: str = Form(...),
-    _user: str = Depends(_require_auth),
 ):
     bot_token = bot_token.strip()
     app_token = app_token.strip()

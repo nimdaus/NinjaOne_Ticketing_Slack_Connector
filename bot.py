@@ -247,13 +247,58 @@ async def _ping_heartbeat(client: httpx.AsyncClient) -> None:
 # ---------------------------------------------------------------------------
 
 
+async def _prefetch_schemas(entries: list[dict]) -> None:
+    """Warm the schema cache for all entries in a multi-form command."""
+    async with httpx.AsyncClient(timeout=30) as http:
+        for entry in entries:
+            try:
+                await _fetch_form_schema(http, entry["ticketFormId"])
+            except Exception as exc:
+                logger.warning("Schema prefetch failed form=%s: %s", entry.get("ticketFormId"), exc)
+
+
+async def _build_form_modal(entry: dict, channel_id: str, cmd: str) -> dict | None:
+    """Fetch the form schema, build Block Kit blocks, and return a modal dict.
+    Returns None if the schema is unreachable or yields no blocks."""
+    try:
+        async with httpx.AsyncClient(timeout=30) as http:
+            form_schema = await _fetch_form_schema(http, entry["ticketFormId"])
+    except Exception as exc:
+        logger.error("Failed to fetch form schema form=%s: %s", entry.get("ticketFormId"), exc)
+        return None
+
+    blocks = build_blocks_from_schema(form_schema)
+    if not blocks:
+        logger.warning("No blocks generated for form %s", entry.get("ticketFormId"))
+        return None
+
+    title = (
+        entry.get("label") or entry.get("ticketFormName")
+        or cmd.lstrip("/").replace("-", " ").title()
+    )[:24]
+
+    return {
+        "type": "modal",
+        "callback_id": f"dynamic_form_submit_{entry['ticketFormId']}",
+        "title": {"type": "plain_text", "text": title},
+        "submit": {"type": "plain_text", "text": "Submit"},
+        "close": {"type": "plain_text", "text": "Cancel"},
+        "private_metadata": json.dumps({
+            "channel_id":     channel_id,
+            "command":        cmd,
+            "ticketFormId":   entry["ticketFormId"],
+            "clientId":       entry["clientId"],
+            "defaultSubject": entry.get("defaultSubject", ""),
+        }),
+        "blocks": blocks,
+    }
+
+
 async def handle_dynamic_command(ack, command, client):
-    """
-    Catch-all command handler. Checks if the invoked command is registered
-    in form_registry.json and opens the appropriate dynamic modal.
-    """
-    cmd = command["command"]        # e.g. "/help-desk"
-    user_id = command["user_id"]
+    """Catch-all handler — opens a selector modal for multi-form commands,
+    or the ticket form directly for single-form commands."""
+    cmd        = command["command"]
+    user_id    = command["user_id"]
     channel_id = command.get("channel_id", "")
 
     if channel_id.startswith("D"):
@@ -261,7 +306,7 @@ async def handle_dynamic_command(ack, command, client):
         return
 
     registry = load_registry()
-    config = registry.get("commands", {}).get(cmd)
+    config   = registry.get("commands", {}).get(cmd)
 
     if not config:
         await ack(
@@ -272,75 +317,114 @@ async def handle_dynamic_command(ack, command, client):
 
     await ack()
 
+    entries = config if isinstance(config, list) else [config]
+
     logger.info(
-        "Dynamic command invoked: cmd=%s user=%s channel=%s form=%s",
-        cmd,
-        user_id,
-        channel_id,
-        config.get("ticketFormId"),
+        "Dynamic command: cmd=%s user=%s channel=%s entries=%d",
+        cmd, user_id, channel_id, len(entries),
     )
 
-    # Fetch the form schema from NinjaOne
-    try:
-        async with httpx.AsyncClient(timeout=30) as http:
-            form_schema = await _fetch_form_schema(http, config["ticketFormId"])
-    except Exception as exc:
-        logger.error("Failed to fetch form schema for %s: %s", cmd, exc)
+    if len(entries) > 1:
+        # Pre-warm schema cache while the user reads the selector
+        asyncio.create_task(_prefetch_schemas(entries))
+
+        options = [
+            {
+                "text": {
+                    "type": "plain_text",
+                    "text": (e.get("label") or e.get("ticketFormName") or f"Form {i + 1}")[:75],
+                },
+                "value": str(i),
+            }
+            for i, e in enumerate(entries)
+        ]
+
+        modal = {
+            "type": "modal",
+            "callback_id": "form_selector",
+            "title": {"type": "plain_text", "text": cmd.lstrip("/")[:24]},
+            "submit": {"type": "plain_text", "text": "Continue"},
+            "close":  {"type": "plain_text", "text": "Cancel"},
+            "private_metadata": json.dumps({
+                "channel_id": channel_id,
+                "command":    cmd,
+                "entries":    entries,
+            }),
+            "blocks": [
+                {
+                    "type": "input",
+                    "block_id": "form_choice",
+                    "label": {"type": "plain_text", "text": "What type of request is this?"},
+                    "element": {
+                        "type": "static_select",
+                        "action_id": "selected_form",
+                        "placeholder": {"type": "plain_text", "text": "Select a form type…"},
+                        "options": options,
+                    },
+                }
+            ],
+        }
+        await client.views_open(trigger_id=command["trigger_id"], view=modal)
+        return
+
+    # Single form — open the ticket form directly
+    modal = await _build_form_modal(entries[0], channel_id, cmd)
+    if modal is None:
         try:
             await client.chat_postEphemeral(
                 channel=channel_id,
                 user=user_id,
                 text=(
                     f":x: Could not load the form for `{cmd}`. "
-                    f"The NinjaOne API returned an error:\n```{exc}```"
+                    f"Check the NinjaOne API connection and Form ID "
+                    f"{entries[0].get('ticketFormId')}."
                 ),
             )
         except Exception:
             pass
         return
-
-    # Build Block Kit blocks from the schema
-    blocks = build_blocks_from_schema(form_schema)
-
-    if not blocks:
-        logger.warning("No blocks generated for form %s", config["ticketFormId"])
-        try:
-            await client.chat_postEphemeral(
-                channel=channel_id,
-                user=user_id,
-                text=(
-                    f":warning: The ticket form linked to `{cmd}` has no fields. "
-                    f"Check the form configuration in NinjaOne (Form ID: {config['ticketFormId']})."
-                ),
-            )
-        except Exception:
-            pass
-        return
-
-    # Derive modal title from the form name or command name
-    form_name = config.get("ticketFormName", cmd.lstrip("/").replace("-", " ").title())
-    modal_title = form_name[:24]  # Slack title limit is 24 chars
-
-    # Build the modal
-    private_metadata = json.dumps({
-        "channel_id": channel_id,
-        "command": cmd,
-        "ticketFormId": config["ticketFormId"],
-        "clientId": config["clientId"],
-        "defaultSubject": config.get("defaultSubject", ""),
-    })
-
-    modal = {
-        "type": "modal",
-        "callback_id": f"dynamic_form_submit_{config['ticketFormId']}",
-        "title": {"type": "plain_text", "text": modal_title},
-        "submit": {"type": "plain_text", "text": "Submit"},
-        "close": {"type": "plain_text", "text": "Cancel"},
-        "private_metadata": private_metadata,
-        "blocks": blocks,
-    }
 
     await client.views_open(trigger_id=command["trigger_id"], view=modal)
+
+
+async def handle_form_selector_submission(ack, body, client, view):
+    """Handles the selector modal — pushes the chosen ticket form on top."""
+    metadata   = json.loads(view.get("private_metadata", "{}"))
+    entries    = metadata.get("entries", [])
+    channel_id = metadata.get("channel_id", "")
+    cmd        = metadata.get("command", "")
+    user_id    = body["user"]["id"]
+
+    raw = view["state"]["values"]["form_choice"]["selected_form"].get("selected_option")
+    if not raw:
+        await ack({"response_action": "errors", "errors": {"form_choice": "Please select a form type."}})
+        return
+
+    selected_idx = int(raw["value"])
+    if selected_idx >= len(entries):
+        await ack({"response_action": "errors", "errors": {"form_choice": "Invalid selection — please try again."}})
+        return
+
+    entry = entries[selected_idx]
+    modal = await _build_form_modal(entry, channel_id, cmd)
+
+    if modal is None:
+        await ack({
+            "response_action": "errors",
+            "errors": {
+                "form_choice": (
+                    f"Could not load form ID {entry.get('ticketFormId')}. "
+                    f"Check the NinjaOne API connection."
+                ),
+            },
+        })
+        return
+
+    logger.info(
+        "Form selector: cmd=%s user=%s idx=%d form=%s",
+        cmd, user_id, selected_idx, entry.get("ticketFormId"),
+    )
+    await ack({"response_action": "push", "view": modal})
 
 
 # ---------------------------------------------------------------------------
@@ -640,6 +724,7 @@ async def _notify_error(client, channel: str, user_id: str, message: str):
 
 def _register_handlers(bolt_app) -> None:
     bolt_app.command(re.compile(r".*"))(handle_dynamic_command)
+    bolt_app.view("form_selector")(handle_form_selector_submission)
     bolt_app.view(re.compile(r"^dynamic_form_submit_\d+"))(handle_dynamic_submission)
 
 

@@ -3,6 +3,24 @@
 
 {% block content %}
 
+<style>
+  .entry-row {
+    border: 1px solid #e5e7eb;
+    border-radius: 6px;
+    padding: 1.1rem;
+    margin-bottom: 1rem;
+    background: #fafafa;
+  }
+  .entry-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: .9rem;
+  }
+  .entry-label { font-size: .8rem; font-weight: 600; color: #6b7280; text-transform: uppercase; letter-spacing: .05em; }
+  .entry-divider { border: none; border-top: 1px solid #e5e7eb; margin: 1rem 0; }
+</style>
+
 <div class="card">
   <div class="page-header">
     <h2>{{ "Edit" if editing else "Add" }} command</h2>
@@ -13,8 +31,8 @@
   <div class="alert alert-error" style="margin-bottom:1.25rem">{{ error }}</div>
   {% endif %}
 
-  <form method="post" action="{{ action }}">
-    <div class="form-grid">
+  <form method="post" action="{{ action }}" id="cmd-form">
+    <div class="form-grid" style="margin-bottom:1.25rem;">
 
       <!-- Slash command -->
       <div class="form-group">
@@ -33,67 +51,101 @@
         >
       </div>
 
-      <!-- NinjaOne form -->
-      <div class="form-group">
-        <label for="ticket_form_id">NinjaOne ticket form</label>
-        {% if forms %}
-        <select id="ticket_form_id" name="ticket_form_id" required
-                onchange="syncFormName(this)">
-          <option value="">— select a form —</option>
-          {% for f in forms %}
-          <option
-            value="{{ f.id }}"
-            data-name="{{ f.name or f.title or '' }}"
-            {% if entry.ticketFormId == f.id %}selected{% endif %}
-          >{{ f.name or f.title or f.id }}</option>
-          {% endfor %}
-        </select>
-        {% else %}
-        <input type="text" placeholder="Could not load forms from NinjaOne" disabled>
-        {% endif %}
-        <!-- Hidden field carries the human-readable name for display in the table -->
-        <input type="hidden" id="ticket_form_name" name="ticket_form_name"
-               value="{{ entry.ticketFormName or '' }}">
-      </div>
+    </div>
 
-      <!-- Organisation -->
-      <div class="form-group">
-        <label for="client_id">Organisation</label>
-        {% if orgs %}
-        <select id="client_id" name="client_id" required
-                onchange="syncClientName(this)">
-          <option value="">— select an organisation —</option>
-          {% for o in orgs %}
-          <option
-            value="{{ o.id }}"
-            data-name="{{ o.name or '' }}"
-            {% if entry.clientId == o.id %}selected{% endif %}
-          >{{ o.name or o.id }}</option>
-          {% endfor %}
-        </select>
-        {% else %}
-        <input type="text" placeholder="Could not load organisations from NinjaOne" disabled>
-        {% endif %}
-        <input type="hidden" id="client_name" name="client_name"
-               value="{{ entry.clientName or '' }}">
-      </div>
+    <!-- ── Form entries ── -->
+    <div id="entries-container">
+      {% for e in entries %}
+      {% set i = loop.index0 %}
+      <div class="entry-row">
+        <div class="entry-header">
+          <span class="entry-label" data-entry-num>Form {{ i + 1 }}</span>
+          <button type="button" class="btn btn-danger btn-sm remove-btn"
+                  style="{{ 'display:none' if entries|length == 1 else '' }}">Remove</button>
+        </div>
 
-      <!-- Default subject -->
-      <div class="form-group">
-        <label for="default_subject">
-          Default subject template
-          <span class="hint">optional — use {Field Name} placeholders, e.g. [Eng Assist] {Root Problem}</span>
-        </label>
-        <input
-          type="text"
-          id="default_subject"
-          name="default_subject"
-          value="{{ entry.defaultSubject or '' }}"
-          placeholder="[Eng Assist] {Root Problem}"
-        >
-      </div>
+        <div class="form-grid">
 
-    </div><!-- /.form-grid -->
+          <!-- Label (hidden when only one entry) -->
+          <div class="form-group label-group"
+               style="{{ 'display:none' if entries|length == 1 else '' }}">
+            <label>
+              Label
+              <span class="hint">shown in the selector when the user runs the command</span>
+            </label>
+            <input type="text" name="label_{{ i }}"
+                   value="{{ e.label or '' }}"
+                   placeholder="e.g. Integration issue">
+          </div>
+
+          <!-- NinjaOne form -->
+          <div class="form-group">
+            <label>NinjaOne ticket form</label>
+            {% if forms %}
+            <select name="ticket_form_id_{{ i }}" class="form-select" required>
+              <option value="">— select a form —</option>
+              {% for f in forms %}
+              <option
+                value="{{ f.id }}"
+                data-name="{{ f.name or f.title or '' }}"
+                {% if e.ticketFormId == f.id %}selected{% endif %}
+              >{{ f.name or f.title or f.id }}</option>
+              {% endfor %}
+            </select>
+            {% else %}
+            <input type="text" placeholder="Could not load forms from NinjaOne" disabled>
+            {% endif %}
+            <input type="hidden" name="ticket_form_name_{{ i }}" class="form-name-hidden"
+                   value="{{ e.ticketFormName or '' }}">
+          </div>
+
+          <!-- Organisation -->
+          <div class="form-group">
+            <label>Organisation</label>
+            {% if orgs %}
+            <select name="client_id_{{ i }}" class="org-select" required>
+              <option value="">— select an organisation —</option>
+              {% for o in orgs %}
+              <option
+                value="{{ o.id }}"
+                data-name="{{ o.name or '' }}"
+                {% if e.clientId == o.id %}selected{% endif %}
+              >{{ o.name or o.id }}</option>
+              {% endfor %}
+            </select>
+            {% else %}
+            <input type="text" placeholder="Could not load organisations from NinjaOne" disabled>
+            {% endif %}
+            <input type="hidden" name="client_name_{{ i }}" class="org-name-hidden"
+                   value="{{ e.clientName or '' }}">
+          </div>
+
+          <!-- Default subject -->
+          <div class="form-group">
+            <label>
+              Default subject template
+              <span class="hint">optional — use {Field Name} placeholders, e.g. [Eng Assist] {Root Problem}</span>
+            </label>
+            <input
+              type="text"
+              name="default_subject_{{ i }}"
+              value="{{ e.defaultSubject or '' }}"
+              placeholder="[Eng Assist] {Root Problem}"
+            >
+          </div>
+
+        </div>
+      </div>
+      {% endfor %}
+    </div>
+
+    <input type="hidden" name="entry_count" id="entry-count" value="{{ entries|length }}">
+
+    <div style="margin-bottom:1.25rem;">
+      <button type="button" id="add-entry" class="btn btn-secondary btn-sm">+ Add another form</button>
+    </div>
+
+    <hr class="entry-divider">
 
     <div class="form-actions">
       <button type="submit" class="btn btn-primary">
@@ -105,15 +157,122 @@
 </div>
 
 <script>
-  // Keep the hidden name fields in sync when the user picks a different option
-  function syncFormName(sel) {
-    const opt = sel.options[sel.selectedIndex];
-    document.getElementById('ticket_form_name').value = opt.dataset.name || '';
+  const FORMS_DATA = {{ forms | tojson }};
+  const ORGS_DATA  = {{ orgs  | tojson }};
+
+  function escHtml(s) {
+    return String(s)
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;');
   }
-  function syncClientName(sel) {
-    const opt = sel.options[sel.selectedIndex];
-    document.getElementById('client_name').value = opt.dataset.name || '';
+
+  function buildEntryHTML(idx) {
+    const formOpts = FORMS_DATA.map(f => {
+      const name = escHtml(f.name || f.title || f.id);
+      return `<option value="${f.id}" data-name="${name}">${name}</option>`;
+    }).join('');
+    const orgOpts = ORGS_DATA.map(o => {
+      const name = escHtml(o.name || o.id);
+      return `<option value="${o.id}" data-name="${name}">${name}</option>`;
+    }).join('');
+
+    const formSel = FORMS_DATA.length
+      ? `<select name="ticket_form_id_${idx}" class="form-select" required>
+           <option value="">— select a form —</option>${formOpts}
+         </select>`
+      : `<input type="text" placeholder="Could not load forms from NinjaOne" disabled>`;
+
+    const orgSel = ORGS_DATA.length
+      ? `<select name="client_id_${idx}" class="org-select" required>
+           <option value="">— select an organisation —</option>${orgOpts}
+         </select>`
+      : `<input type="text" placeholder="Could not load organisations from NinjaOne" disabled>`;
+
+    return `
+      <div class="entry-row">
+        <div class="entry-header">
+          <span class="entry-label" data-entry-num>Form ${idx + 1}</span>
+          <button type="button" class="btn btn-danger btn-sm remove-btn">Remove</button>
+        </div>
+        <div class="form-grid">
+          <div class="form-group label-group">
+            <label>Label <span class="hint">shown in the selector when the user runs the command</span></label>
+            <input type="text" name="label_${idx}" placeholder="e.g. Integration issue">
+          </div>
+          <div class="form-group">
+            <label>NinjaOne ticket form</label>
+            ${formSel}
+            <input type="hidden" name="ticket_form_name_${idx}" class="form-name-hidden">
+          </div>
+          <div class="form-group">
+            <label>Organisation</label>
+            ${orgSel}
+            <input type="hidden" name="client_name_${idx}" class="org-name-hidden">
+          </div>
+          <div class="form-group">
+            <label>Default subject template <span class="hint">optional — use {Field Name} placeholders</span></label>
+            <input type="text" name="default_subject_${idx}" placeholder="[Eng Assist] {Root Problem}">
+          </div>
+        </div>
+      </div>`;
   }
+
+  function renumberRows() {
+    document.querySelectorAll('#entries-container .entry-row').forEach((row, idx) => {
+      row.querySelectorAll('[name]').forEach(el => {
+        el.name = el.name.replace(/_\d+$/, `_${idx}`);
+      });
+      const num = row.querySelector('[data-entry-num]');
+      if (num) num.textContent = `Form ${idx + 1}`;
+    });
+    document.getElementById('entry-count').value =
+      document.querySelectorAll('#entries-container .entry-row').length;
+  }
+
+  function updateMultiState() {
+    const rows  = document.querySelectorAll('#entries-container .entry-row');
+    const multi = rows.length > 1;
+    rows.forEach(row => {
+      const lg = row.querySelector('.label-group');
+      const rb = row.querySelector('.remove-btn');
+      if (lg) lg.style.display = multi ? '' : 'none';
+      if (rb) rb.style.display = multi ? '' : 'none';
+    });
+  }
+
+  // Add entry
+  document.getElementById('add-entry').addEventListener('click', () => {
+    const idx = document.querySelectorAll('#entries-container .entry-row').length;
+    const div = document.createElement('div');
+    div.innerHTML = buildEntryHTML(idx);
+    document.getElementById('entries-container').appendChild(div.firstElementChild);
+    renumberRows();
+    updateMultiState();
+  });
+
+  // Remove entry (delegated)
+  document.getElementById('entries-container').addEventListener('click', e => {
+    if (!e.target.classList.contains('remove-btn')) return;
+    e.target.closest('.entry-row').remove();
+    renumberRows();
+    updateMultiState();
+  });
+
+  // Sync hidden name fields (delegated)
+  document.getElementById('entries-container').addEventListener('change', e => {
+    const row = e.target.closest('.entry-row');
+    if (!row) return;
+    if (e.target.classList.contains('form-select')) {
+      const opt = e.target.options[e.target.selectedIndex];
+      row.querySelector('.form-name-hidden').value = opt.dataset.name || '';
+    }
+    if (e.target.classList.contains('org-select')) {
+      const opt = e.target.options[e.target.selectedIndex];
+      row.querySelector('.org-name-hidden').value = opt.dataset.name || '';
+    }
+  });
 </script>
 
 {% endblock %}

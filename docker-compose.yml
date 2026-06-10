@@ -4,45 +4,14 @@ services:
     image: form-bot:latest
     container_name: form-bot
     restart: unless-stopped
+    env_file:
+      - .env
     environment:
-      # ----------------------------------------------------------------
-      # Slack tokens are configured via the admin web UI at /slack.
-      # Set here only to override the web UI (e.g. for automated deploys).
+      # ── Slack tokens can also be set here to override the web UI ──────────
       # SLACK_BOT_TOKEN: xoxb-your-bot-token
       # SLACK_APP_TOKEN: xapp-your-app-level-token
 
-      # ----------------------------------------------------------------
-      # Optional — Uptime Kuma push URL (leave blank to disable)
-      # ----------------------------------------------------------------
-      HEARTBEAT_URL: ""
-
-      # ----------------------------------------------------------------
-      # Poller — how often to check open tickets for updates (seconds),
-      # and how far back the board filter looks (hours, must be >= interval)
-      # ----------------------------------------------------------------
-      POLL_INTERVAL: "300"
-      POLL_LOOKBACK_HOURS: "1"
-
-      # ----------------------------------------------------------------
-      # Admin web UI — http://your-host:8080
-      # If serving via a reverse proxy or Cloudflare Tunnel, set
-      # ADMIN_BASE_URL to the public URL (e.g. https://engassist.example.com)
-      # so the NinjaOne OAuth callback resolves correctly.
-      # ----------------------------------------------------------------
-      ADMIN_PORT: "8080"
-      ADMIN_PASSWORD: "changeme"
-      ADMIN_BASE_URL: ""
-
-      # ----------------------------------------------------------------
-      # Encryption — recommended. Encrypts credentials.json at rest so a
-      # leaked volume backup cannot be read without this key.
-      # Generate with: python -c "import secrets; print(secrets.token_hex(32))"
-      # ----------------------------------------------------------------
-      ENCRYPTION_KEY: ""
-
-      # ----------------------------------------------------------------
-      # Runtime — do not change
-      # ----------------------------------------------------------------
+      # ── Runtime constants — do not change ─────────────────────────────────
       PYTHONUNBUFFERED: "1"
       LOG_FILE: /app/logs/bot.log
       DB_PATH: /app/data/submissions.db

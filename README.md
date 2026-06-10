@@ -150,19 +150,26 @@ Keep these tokens handy — you will enter them in the admin web UI (step 4).
 > - Missing scopes → setup completes but ticket API calls return 403 Forbidden
 > - No refresh_token in response → usually means the wrong grant type is set; only *Authorization Code* issues a refresh token
 
-### 3. Configure docker-compose.yml
+### 3. Configure the environment
+
+Copy `.env-template` to `.env` and fill in your values:
+
+```bash
+cp .env-template .env
+```
 
 | Variable | Description |
 |---|---|
 | `ADMIN_PORT` | Port for the admin web UI (default `8080`) |
-| `ADMIN_PASSWORD` | HTTP Basic Auth password for the admin web UI — **change from the default** |
 | `ADMIN_BASE_URL` | Public base URL of the admin UI (e.g. `https://engassist.example.com`). Required when running behind a reverse proxy or Cloudflare Tunnel so the NinjaOne OAuth callback URL resolves correctly. Leave blank for direct `localhost` access. |
 | `ENCRYPTION_KEY` | **Recommended.** 64-character hex key for encrypting `credentials.json` and `slack_config.json` at rest. Generate with `python -c "import secrets; print(secrets.token_hex(32))"`. If unset, credentials are stored in plaintext. |
 | `HEARTBEAT_URL` | Optional Uptime Kuma push URL — leave blank to disable |
 | `POLL_INTERVAL` | Seconds between poll cycles (default `300`) |
 | `POLL_LOOKBACK_HOURS` | Board filter window in hours (default `1`, must be ≥ interval) |
 
-> **Important:** keep `ENCRYPTION_KEY` in `docker-compose.yml` and back it up separately from the `./data/` volume. If the key is lost, credentials cannot be recovered and both the NinjaOne and Slack setup must be re-run.
+> **Important:** back `ENCRYPTION_KEY` up separately from the `./data/` volume. If the key is lost, credentials cannot be recovered and both the NinjaOne and Slack setup must be re-run. Add `.env` to `.gitignore` — it should never be committed.
+
+> **Access control:** the admin UI has no built-in authentication. Protect it at the network boundary — Cloudflare Access (zero-trust policy on the tunnel) or an SSH tunnel for local access are the recommended approaches. Do not expose the port directly to the internet.
 
 ### 4. Run
 
@@ -175,7 +182,7 @@ The container starts in setup mode — no Slack tokens are loaded yet so the bot
 
 ### 5. Slack token setup (one-time, via admin web UI)
 
-Open `http://your-host:8080` in a browser and log in with any username and the `ADMIN_PASSWORD` you set.
+Open `http://your-host:8080` (or your public URL) in a browser.
 
 1. Follow the **Configure Slack** banner on the home page (or navigate to **/slack**).
 2. Enter the `xoxb-` bot token and `xapp-` app-level token from step 1.
@@ -184,12 +191,10 @@ Open `http://your-host:8080` in a browser and log in with any username and the `
 ### 6. NinjaOne OAuth setup (one-time, via admin web UI)
 
 1. Navigate to **Setup** (or follow the NinjaOne banner on the home page).
-2. The setup page shows the redirect URI the bot will use (e.g. `http://localhost:8080/oauth/callback`). This must be registered in your NinjaOne API application (step 2) before proceeding.
+2. The setup page shows the redirect URI the bot will use. This must be registered in your NinjaOne API application (step 2) before proceeding.
 3. Enter your NinjaOne API base URL (e.g. `https://ca.ninjarmm.com`), Client ID, and Client Secret, then click **Authorise with NinjaOne**.
 4. Your browser is redirected to NinjaOne. Approve the application.
 5. NinjaOne redirects back to the bot automatically. Credentials are saved to `/app/data/credentials.json` (persisted on the mounted volume) and the bot begins creating tickets immediately — no restart required.
-
-> **Security note:** the admin UI is bound to `127.0.0.1` by default. If your Docker host is remote, tunnel via SSH rather than exposing port 8080 to the internet.
 
 ### 7. Register commands
 
@@ -212,7 +217,8 @@ On the admin home page, use the form to link each slash command to a NinjaOne ti
 | `form_registry.json` | Runtime command → form mappings (managed via admin web UI) |
 | `pyproject.toml` | Python dependencies |
 | `Dockerfile` | Python 3.12 + uv image |
-| `docker-compose.yml` | Service definition and configuration |
+| `docker-compose.yml` | Service definition — runtime constants only; secrets come from `.env` |
+| `.env-template` | Template for the `.env` file — copy to `.env` and fill in values |
 
 ---
 

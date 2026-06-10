@@ -51,18 +51,29 @@
     </thead>
     <tbody>
       {% for cmd, entry in commands.items() %}
+      {% set multi = entry is not mapping %}
       <tr>
         <td><span class="mono">{{ cmd }}</span></td>
         <td>
-          {{ entry.ticketFormName or '' }}
-          <span class="muted mono" style="font-size:.75rem"> #{{ entry.ticketFormId }}</span>
+          {% if multi %}
+            <span class="muted">{{ entry | length }} forms</span>
+          {% else %}
+            {{ entry.ticketFormName or '' }}
+            <span class="muted mono" style="font-size:.75rem"> #{{ entry.ticketFormId }}</span>
+          {% endif %}
         </td>
         <td>
-          {{ entry.clientName or '' }}
-          <span class="muted mono" style="font-size:.75rem"> #{{ entry.clientId }}</span>
+          {% if multi %}
+            <span class="muted">—</span>
+          {% else %}
+            {{ entry.clientName or '' }}
+            <span class="muted mono" style="font-size:.75rem"> #{{ entry.clientId }}</span>
+          {% endif %}
         </td>
         <td>
-          {% if entry.defaultSubject %}
+          {% if multi %}
+            <span class="muted">—</span>
+          {% elif entry.defaultSubject %}
             <span class="mono" style="font-size:.8rem">{{ entry.defaultSubject }}</span>
           {% else %}
             <span class="muted">auto</span>
