@@ -31,27 +31,28 @@ import httpx
 from slack_sdk.web.async_client import AsyncWebClient
 
 from db import get_all_open_tickets, get_threads_for_ticket, update_ticket_seen
-from ninja_auth import get_api_base
+from ninja_auth import get_api_base, load_slack_config
 
 logger = logging.getLogger("eng_assist_bot.poller")
 
-SLACK_BOT_TOKEN      = os.environ["SLACK_BOT_TOKEN"]
 POLL_INTERVAL        = int(os.environ.get("POLL_INTERVAL", "120"))
 POLL_LOOKBACK_HOURS  = int(os.environ.get("POLL_LOOKBACK_HOURS", "1"))
 
 BOARD_ID = 2  # board that returns all tickets
 
-# Log-entry types we care about relaying to Slack.
-# COMMENT = engineer/technician comment, DESCRIPTION = original ticket body.
-# SAVE entries carry changeDiff for field edits (including status) but are
-# noisy and handled separately via the status field in the board response.
 RELAY_TYPES = ["COMMENT"]
-
-# NinjaOne status IDs that indicate a closed ticket.
-# "4xxx" codes are the standard closed states; add instance-specific values here.
 CLOSED_STATUSES = {"4000", "closed", "resolved", "complete", "completed"}
 
-_slack = AsyncWebClient(token=SLACK_BOT_TOKEN)
+_slack: AsyncWebClient | None = None
+
+
+def _get_slack_client() -> AsyncWebClient:
+    """Return the Slack client, (re-)initialising it whenever the token changes."""
+    global _slack
+    bot_token = os.environ.get("SLACK_BOT_TOKEN", "") or load_slack_config().get("bot_token", "")
+    if _slack is None or _slack.token != bot_token:
+        _slack = AsyncWebClient(token=bot_token)
+    return _slack
 
 
 # ---------------------------------------------------------------------------
@@ -359,7 +360,7 @@ async def _post_log_entry(sub: dict, entry: dict, ticket_id: str) -> None:
 
 async def _post_thread(sub: dict, *, text: str, blocks: list) -> None:
     try:
-        await _slack.chat_postMessage(
+        await _get_slack_client().chat_postMessage(
             channel=sub["slack_channel_id"],
             thread_ts=sub["slack_message_ts"],
             text=text,
