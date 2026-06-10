@@ -387,21 +387,26 @@ async def oauth_callback(request: Request):
                 },
             )
 
+        try:
+            resp_body = resp.json()
+        except Exception:
+            resp_body = None
+
         if resp.status_code != 200:
-            try:
-                detail = resp.json().get("error_description") or resp.text[:300]
-            except Exception:
-                detail = resp.text[:300]
+            detail = (
+                resp_body.get("error_description") or resp_body.get("error") or resp.text[:500]
+                if resp_body else resp.text[:500]
+            )
             msg = f"Token exchange failed (HTTP {resp.status_code}): {detail}"
             return RedirectResponse(f"/setup?error={quote(msg)}", status_code=303)
 
-        data          = resp.json()
-        refresh_token = data.get("refresh_token", "")
+        refresh_token = (resp_body or {}).get("refresh_token", "")
 
         if not refresh_token:
+            body_preview = resp.text[:500] if not resp_body else str(resp_body)[:500]
             msg = (
-                "NinjaOne did not return a refresh_token. "
-                "Ensure your API app has the correct scopes (monitoring management)."
+                f"Token exchange succeeded (HTTP 200) but the response did not include a "
+                f"refresh_token. Response body: {body_preview}"
             )
             return RedirectResponse(f"/setup?error={quote(msg)}", status_code=303)
 
