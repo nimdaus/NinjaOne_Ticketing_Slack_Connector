@@ -160,8 +160,7 @@ async def index(
 ):
     registry = load_registry()
     commands = registry.get("commands", {})
-    return _templates.TemplateResponse("index.html", {
-        "request":          request,
+    return _templates.TemplateResponse(request, "index.html", {
         "commands":         commands,
         "saved":            saved,
         "deleted":          deleted,
@@ -188,8 +187,7 @@ async def new_command_form(
         forms, orgs = [], []
         error = f"Could not load NinjaOne data: {exc}"
 
-    return _templates.TemplateResponse("command_form.html", {
-        "request":  request,
+    return _templates.TemplateResponse(request, "command_form.html", {
         "action":   "/command/new",
         "editing":  False,
         "cmd":      "",
@@ -245,8 +243,7 @@ async def edit_command_form(
         forms, orgs = [], []
         error = f"Could not load NinjaOne data: {exc}"
 
-    return _templates.TemplateResponse("command_form.html", {
-        "request":  request,
+    return _templates.TemplateResponse(request, "command_form.html", {
         "action":   f"/command/{quote(cmd, safe='')}/edit",
         "editing":  True,
         "cmd":      cmd,
@@ -305,8 +302,7 @@ async def setup_page(
     error: str = "",
     _user: str = Depends(_require_auth),
 ):
-    return _templates.TemplateResponse("setup.html", {
-        "request":      request,
+    return _templates.TemplateResponse(request, "setup.html", {
         "configured":   is_configured(),
         "callback_url": _callback_url(request),
         "error":        error,
@@ -441,8 +437,7 @@ async def slack_page(
     _user: str = Depends(_require_auth),
 ):
     cfg = load_slack_config()
-    return _templates.TemplateResponse("slack.html", {
-        "request":    request,
+    return _templates.TemplateResponse(request, "slack.html", {
         "configured": is_slack_configured(),
         "bot_token":  cfg.get("bot_token", ""),
         "app_token":  cfg.get("app_token", ""),
