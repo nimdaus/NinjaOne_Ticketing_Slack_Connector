@@ -319,7 +319,7 @@ async def setup_start(
         f"?response_type=code"
         f"&client_id={quote(client_id, safe='')}"
         f"&redirect_uri={quote(redirect_uri, safe='')}"
-        f"&scope=monitoring+management"
+        f"&scope=monitoring+management+offline_access"
         f"&state={state}"
     )
     _write_pending({

@@ -141,7 +141,7 @@ Keep these tokens handy — you will enter them in the admin web UI (step 4).
 1. **Administration → Apps → API** → create an API application
 2. Configure as follows — **all three settings are required**:
    - Grant type: **Authorization Code** (not Client Credentials or any other type)
-   - Scopes: **monitoring** and **management**
+   - Scopes: **monitoring**, **management**, and **offline_access**
    - Redirect URI: `http://your-host:8080/oauth/callback` (exact value shown on the setup page)
 3. Note the Client ID and Client Secret
 
