@@ -118,8 +118,9 @@ def _callback_url(request: Request) -> str:
     Tunnel where request.base_url reflects the internal address, not the public
     one that NinjaOne will redirect to).
     """
-    base = ADMIN_BASE_URL or str(request.base_url).rstrip("/")
-    return base + "/oauth/callback"
+    if ADMIN_BASE_URL:
+        return ADMIN_BASE_URL.rstrip("/") + "/oauth/callback"
+    return f"{request.url.scheme}://{request.url.netloc}/oauth/callback"
 
 
 # ---------------------------------------------------------------------------
