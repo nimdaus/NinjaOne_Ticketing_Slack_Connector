@@ -37,7 +37,7 @@ from ninja_auth import (
     data_dir, encrypt_data, decrypt_data, encryption_enabled,
     is_slack_configured, load_slack_config, save_slack_config,
 )
-from schema_mapper import _extract_fields_list
+from schema_mapper import _extract_fields_list, _resolve_field_type, _is_field_required
 
 ADMIN_BASE_URL = os.environ.get("ADMIN_BASE_URL", "").rstrip("/")
 
@@ -225,18 +225,9 @@ async def api_form_fields(form_id: int) -> JSONResponse:
             or field_id
         )
 
-        ninja_type = str(
-            field.get("type")
-            or field.get("fieldType")
-            or field.get("uiType")
-            or "TEXT"
-        ).upper()
-
+        ninja_type = _resolve_field_type(field)
         default_slack_type = _DEFAULT_SLACK_TYPE.get(ninja_type, "plain_text_input")
-
-        is_required = field.get("required", False)
-        if isinstance(is_required, str):
-            is_required = is_required.lower() in ("true", "1", "yes")
+        is_required = _is_field_required(field)
 
         fields_out.append({
             "id":               field_id,

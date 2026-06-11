@@ -374,9 +374,7 @@ def extract_values_from_submission(
         )
 
         # Determine if the field is required (required fields are never excluded)
-        is_required = field.get("required", False)
-        if isinstance(is_required, str):
-            is_required = is_required.lower() in ("true", "1", "yes")
+        is_required = _is_field_required(field)
 
         # Skip excluded fields (unless required)
         override = (field_overrides or {}).get(str(field_id), {})
@@ -440,6 +438,43 @@ _OVERRIDE_TYPE_MAP: dict[str, callable] = {
     "number_input":               _build_number_element,
 }
 
+# technicianOption / endUserOption values that mean "required at ticket creation"
+_REQUIRED_TECH_OPTIONS = {"REQUIRED_TO_CREATE", "REQUIRED"}
+_REQUIRED_USER_OPTIONS = {"EDITABLE_REQUIRED", "HIDDEN_REQUIRED"}
+
+
+def _resolve_field_type(field: dict) -> str:
+    """Return the NinjaOne field type string, checking all known key names."""
+    return str(
+        field.get("attributeType")
+        or field.get("type")
+        or field.get("fieldType")
+        or field.get("uiType")
+        or "TEXT"
+    ).upper()
+
+
+def _is_field_required(field: dict) -> bool:
+    """Return True if the field must be filled at ticket-creation time."""
+    # Top-level required flag (some API versions)
+    top = field.get("required", False)
+    if isinstance(top, str):
+        top = top.lower() in ("true", "1", "yes")
+    if top:
+        return True
+    # content.required (some API versions)
+    content_req = (field.get("content") or {}).get("required", False)
+    if isinstance(content_req, str):
+        content_req = content_req.lower() in ("true", "1", "yes")
+    if content_req:
+        return True
+    # technicianOption / endUserOption (current NinjaOne ticketing API)
+    if field.get("technicianOption", "").upper() in _REQUIRED_TECH_OPTIONS:
+        return True
+    if field.get("endUserOption", "").upper() in _REQUIRED_USER_OPTIONS:
+        return True
+    return False
+
 
 def _field_to_block(field: dict, field_overrides: dict | None = None) -> dict | None:
     """Convert a single NinjaOne field definition to a Slack input block.
@@ -449,12 +484,7 @@ def _field_to_block(field: dict, field_overrides: dict | None = None) -> dict | 
                          ``{"included": false}`` skips the field (unless required).
                          ``{"slackType": "..."}`` replaces the default element builder.
     """
-    field_type = str(
-        field.get("type")
-        or field.get("fieldType")
-        or field.get("uiType")
-        or "TEXT"
-    ).upper()
+    field_type = _resolve_field_type(field)
 
     field_id = str(field.get("id") or field.get("fieldId") or field.get("name", "unknown"))
     label = str(
@@ -469,10 +499,7 @@ def _field_to_block(field: dict, field_overrides: dict | None = None) -> dict | 
         logger.debug("Skipping hidden/system field: %s", label)
         return None
 
-    # Determine if the field is required (must be known before override checks)
-    is_required = field.get("required", False)
-    if isinstance(is_required, str):
-        is_required = is_required.lower() in ("true", "1", "yes")
+    is_required = _is_field_required(field)
 
     # Apply field overrides
     override = (field_overrides or {}).get(str(field_id), {})
