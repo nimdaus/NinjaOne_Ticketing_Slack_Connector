@@ -26,7 +26,7 @@ def _build_text_element(field: dict) -> dict:
         "action_id": "value",
         "placeholder": {
             "type": "plain_text",
-            "text": field.get("description", field.get("label", "Enter value"))[:150],
+            "text": (field.get("description") or field.get("label") or "Enter value")[:150],
         },
     }
 
@@ -39,7 +39,7 @@ def _build_multiline_element(field: dict) -> dict:
         "multiline": True,
         "placeholder": {
             "type": "plain_text",
-            "text": field.get("description", field.get("label", "Enter text"))[:150],
+            "text": (field.get("description") or field.get("label") or "Enter text")[:150],
         },
     }
 
@@ -59,7 +59,7 @@ def _build_dropdown_element(field: dict) -> dict:
         "action_id": "value",
         "placeholder": {
             "type": "plain_text",
-            "text": f"Select {field.get('label', 'option')}",
+            "text": f"Select {field.get('label') or 'option'}",
         },
         "options": options,
     }
@@ -79,7 +79,7 @@ def _build_multi_select_element(field: dict) -> dict:
         "action_id": "value",
         "placeholder": {
             "type": "plain_text",
-            "text": f"Select {field.get('label', 'options')}",
+            "text": f"Select {field.get('label') or 'options'}",
         },
         "options": options,
     }
@@ -87,7 +87,7 @@ def _build_multi_select_element(field: dict) -> dict:
 
 def _build_checkbox_element(field: dict) -> dict:
     """Single checkbox toggle (boolean field)."""
-    label = field.get("label", field.get("name", "Yes"))
+    label = field.get("label") or field.get("name") or "Yes"
     return {
         "type": "checkboxes",
         "action_id": "value",
@@ -107,7 +107,7 @@ def _build_date_element(field: dict) -> dict:
         "action_id": "value",
         "placeholder": {
             "type": "plain_text",
-            "text": f"Select {field.get('label', 'date')}",
+            "text": f"Select {field.get('label') or 'date'}",
         },
     }
 
@@ -127,7 +127,7 @@ def _build_time_element(field: dict) -> dict:
         "action_id": "value",
         "placeholder": {
             "type": "plain_text",
-            "text": f"Select {field.get('label', 'time')}",
+            "text": f"Select {field.get('label') or 'time'}",
         },
     }
 
@@ -139,7 +139,7 @@ def _build_email_element(field: dict) -> dict:
         "action_id": "value",
         "placeholder": {
             "type": "plain_text",
-            "text": field.get("description", "Enter email address")[:150],
+            "text": (field.get("description") or "Enter email address")[:150],
         },
     }
 
@@ -151,7 +151,7 @@ def _build_url_element(field: dict) -> dict:
         "action_id": "value",
         "placeholder": {
             "type": "plain_text",
-            "text": field.get("description", "Enter URL")[:150],
+            "text": (field.get("description") or "Enter URL")[:150],
         },
     }
 
@@ -164,7 +164,7 @@ def _build_number_element(field: dict) -> dict:
         "is_decimal_allowed": True,
         "placeholder": {
             "type": "plain_text",
-            "text": field.get("description", "Enter number")[:150],
+            "text": (field.get("description") or "Enter number")[:150],
         },
     }
 
