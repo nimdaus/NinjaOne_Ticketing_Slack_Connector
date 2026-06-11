@@ -13,7 +13,7 @@ COPY pyproject.toml ./
 RUN uv pip install --system --no-cache -r pyproject.toml
 
 # Copy application modules
-COPY bot.py schema_mapper.py registry.py signals.py form_registry.json \
+COPY bot.py schema_mapper.py registry.py signals.py \
      ninja_auth.py db.py poller.py web.py ./
 COPY templates/ ./templates/
 

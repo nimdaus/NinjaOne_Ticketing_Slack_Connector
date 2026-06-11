@@ -19,9 +19,7 @@ services:
     volumes:
       # Persist rotating log files and the Docker healthcheck marker
       - ./logs:/app/logs
-      # Persist form registry across container restarts
-      - ./form_registry.json:/app/form_registry.json
-      # Persist submissions database across container restarts
+      # Persist credentials, registry, and submissions database across rebuilds
       - ./data:/app/data
 
     ports:
