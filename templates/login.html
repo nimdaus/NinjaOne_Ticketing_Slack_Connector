@@ -1,0 +1,35 @@
+{% extends "base.html" %}
+{% block title %}Log in — Eng Assist Admin{% endblock %}
+
+{% block content %}
+
+{% if error %}
+<div class="alert alert-error">{{ error }}</div>
+{% endif %}
+
+<div class="card" style="max-width:380px;margin:4rem auto;">
+  <div class="page-header">
+    <h2>Admin login</h2>
+  </div>
+
+  <form method="post" action="/{{ url_secret }}/login" class="form-grid">
+    <div class="form-group">
+      <label for="password">Password</label>
+      <input
+        type="password"
+        id="password"
+        name="password"
+        placeholder="Admin password"
+        autofocus
+        required
+        autocomplete="current-password"
+      >
+    </div>
+
+    <div class="form-actions">
+      <button type="submit" class="btn btn-primary" style="width:100%">Log in</button>
+    </div>
+  </form>
+</div>
+
+{% endblock %}

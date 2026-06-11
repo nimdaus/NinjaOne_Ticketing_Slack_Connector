@@ -31,7 +31,7 @@ import httpx
 from slack_sdk.web.async_client import AsyncWebClient
 
 from db import get_all_open_tickets, get_threads_for_ticket, update_ticket_seen
-from ninja_auth import get_api_base, load_slack_config
+from tenant import Tenant
 
 logger = logging.getLogger("eng_assist_bot.poller")
 
@@ -43,35 +43,24 @@ BOARD_ID = 2  # board that returns all tickets
 RELAY_TYPES = ["COMMENT"]
 CLOSED_STATUSES = {"4000", "closed", "resolved", "complete", "completed"}
 
-_slack: AsyncWebClient | None = None
-
-
-def _get_slack_client() -> AsyncWebClient:
-    """Return the Slack client, (re-)initialising it whenever the token changes."""
-    global _slack
-    bot_token = os.environ.get("SLACK_BOT_TOKEN", "") or load_slack_config().get("bot_token", "")
-    if _slack is None or _slack.token != bot_token:
-        _slack = AsyncWebClient(token=bot_token)
-    return _slack
-
-
 # ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 
-async def run_poller(get_ninja_token) -> None:
+async def run_poller(tenant: Tenant) -> None:
     """
-    Infinite polling loop.  Accepts the bot's ``_get_ninja_token`` coroutine
-    so the poller shares the same token cache and refresh logic.
+    Infinite polling loop.  Accepts a ``Tenant`` object so the poller uses
+    tenant-specific resources (auth, DB, Slack client).
     """
     logger.info(
-        "Poller started — interval=%ds lookback=%dh",
+        "Poller started for tenant=%s — interval=%ds lookback=%dh",
+        tenant.id,
         POLL_INTERVAL,
         POLL_LOOKBACK_HOURS,
     )
     while True:
         try:
-            await _poll_cycle(get_ninja_token)
+            await _poll_cycle(tenant)
         except Exception:
             logger.exception("Unhandled error in poll cycle — will retry")
         await asyncio.sleep(POLL_INTERVAL)
@@ -81,47 +70,48 @@ async def run_poller(get_ninja_token) -> None:
 # Single poll cycle
 # ---------------------------------------------------------------------------
 
-async def _poll_cycle(get_ninja_token) -> None:
-    tickets = await get_all_open_tickets()
+async def _poll_cycle(tenant: Tenant) -> None:
+    tickets = await get_all_open_tickets(db_path=tenant.db_path())
     if not tickets:
         return
 
     tracked = {t["ninja_ticket_id"]: t for t in tickets}
 
-    async with httpx.AsyncClient(timeout=30) as http:
-        token = await get_ninja_token(http)
-        headers = {
-            "Authorization": f"Bearer {token}",
-            "Content-Type": "application/json",
-        }
+    http = tenant.http_client
+    token = await tenant.ninja_auth.get_ninja_token(http)
+    api_base = tenant.ninja_auth.get_api_base()
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json",
+    }
 
-        # Step 1 — board run: get recently changed ticket IDs + their status
-        changed = await _board_run(http, headers)
-        if not changed:
-            logger.debug("Board run returned no recently changed tickets")
-            return
+    # Step 1 — board run: get recently changed ticket IDs + their status
+    changed = await _board_run(http, headers, api_base)
+    if not changed:
+        logger.debug("Board run returned no recently changed tickets")
+        return
 
-        logger.debug(
-            "Board run: %d recently changed ticket(s), %d tracked",
-            len(changed),
-            len(tracked),
-        )
+    logger.debug(
+        "Board run: %d recently changed ticket(s), %d tracked",
+        len(changed),
+        len(tracked),
+    )
 
-        # Step 2 — intersect and process only tickets we're tracking
-        for ticket_id, board_row in changed.items():
-            if ticket_id not in tracked:
-                continue
-            try:
-                await _process_ticket(http, headers, tracked[ticket_id], board_row)
-            except Exception:
-                logger.exception("Error processing ticket %s", ticket_id)
+    # Step 2 — intersect and process only tickets we're tracking
+    for ticket_id, board_row in changed.items():
+        if ticket_id not in tracked:
+            continue
+        try:
+            await _process_ticket(http, headers, api_base, tracked[ticket_id], board_row, tenant)
+        except Exception:
+            logger.exception("Error processing ticket %s", ticket_id)
 
 
 # ---------------------------------------------------------------------------
 # Board run
 # ---------------------------------------------------------------------------
 
-async def _board_run(http: httpx.AsyncClient, headers: dict) -> dict[str, dict]:
+async def _board_run(http: httpx.AsyncClient, headers: dict, api_base: str) -> dict[str, dict]:
     """
     POST to board/2/run with a ticket_changed filter.
 
@@ -146,7 +136,7 @@ async def _board_run(http: httpx.AsyncClient, headers: dict) -> dict[str, dict]:
 
     try:
         resp = await http.post(
-            f"{get_api_base()}/v2/ticketing/trigger/board/{BOARD_ID}/run",
+            f"{api_base}/v2/ticketing/trigger/board/{BOARD_ID}/run",
             headers=headers,
             json=payload,
         )
@@ -177,13 +167,15 @@ async def _board_run(http: httpx.AsyncClient, headers: dict) -> dict[str, dict]:
 async def _process_ticket(
     http: httpx.AsyncClient,
     headers: dict,
+    api_base: str,
     ticket: dict,
     board_row: dict,
+    tenant: "Tenant",
 ) -> None:
     ticket_id = ticket["ninja_ticket_id"]
 
     # Load all Slack threads watching this ticket for fan-out
-    threads = await get_threads_for_ticket(ticket_id)
+    threads = await get_threads_for_ticket(ticket_id, db_path=tenant.db_path())
     if not threads:
         logger.debug("Ticket %s has no tracked threads, skipping", ticket_id)
         return
@@ -198,17 +190,17 @@ async def _process_ticket(
             ticket_id, last_status, current_status, len(threads),
         )
         for thread in threads:
-            await _post_status_update(thread, current_status, last_status, ticket_id)
-        await update_ticket_seen(ticket_id, last_status=current_status)
+            await _post_status_update(thread, current_status, last_status, ticket_id, api_base, tenant.slack_client)
+        await update_ticket_seen(ticket_id, last_status=current_status, db_path=tenant.db_path())
 
         if _is_closed(current_status):
             logger.info("Ticket %s is closed — removing from poll queue", ticket_id)
-            await update_ticket_seen(ticket_id, closed=True)
+            await update_ticket_seen(ticket_id, closed=True, db_path=tenant.db_path())
             return  # no need to fetch comments for a closed ticket
 
     # --- new comments --------------------------------------------------------
     anchor_id = ticket.get("last_activity_id") or None
-    entries   = await _get_log_entries(http, headers, ticket_id, anchor_id)
+    entries   = await _get_log_entries(http, headers, api_base, ticket_id, anchor_id)
 
     if not entries:
         return
@@ -217,7 +209,7 @@ async def _process_ticket(
     newest_id = anchor_id
     for entry in entries:
         for thread in threads:
-            await _post_log_entry(thread, entry, ticket_id)
+            await _post_log_entry(thread, entry, ticket_id, api_base, tenant.slack_client)
         entry_id = entry.get("id")
         if entry_id is not None:
             newest_id = entry_id
@@ -227,6 +219,7 @@ async def _process_ticket(
             ticket_id,
             last_activity_id=str(newest_id),
             last_activity_ts=float(entries[-1].get("createTime") or 0),
+            db_path=tenant.db_path(),
         )
 
 
@@ -237,6 +230,7 @@ async def _process_ticket(
 async def _get_log_entries(
     http: httpx.AsyncClient,
     headers: dict,
+    api_base: str,
     ticket_id: str,
     anchor_id: str | None,
 ) -> list[dict]:
@@ -256,7 +250,7 @@ async def _get_log_entries(
 
     try:
         resp = await http.get(
-            f"{get_api_base()}/v2/ticketing/ticket/{ticket_id}/log-entry",
+            f"{api_base}/v2/ticketing/ticket/{ticket_id}/log-entry",
             headers=headers,
             params=params,
         )
@@ -307,9 +301,9 @@ def _entry_body(entry: dict) -> str:
 # ---------------------------------------------------------------------------
 
 async def _post_status_update(
-    sub: dict, current_status: str, last_status: str, ticket_id: str
+    sub: dict, current_status: str, last_status: str, ticket_id: str, api_base: str, slack_client
 ) -> None:
-    ticket_url = f"{get_api_base()}/#/ticketing/ticket/{ticket_id}"
+    ticket_url = f"{api_base}/#/ticketing/ticket/{ticket_id}"
     link       = f"<{ticket_url}|#{ticket_id}>"
     change     = f"{last_status} → {current_status}" if last_status else current_status
 
@@ -324,15 +318,16 @@ async def _post_status_update(
             "type": "section",
             "text": {"type": "mrkdwn", "text": f"{emoji} *{label}:* {change}\n{link}"},
         }],
+        slack_client=slack_client,
     )
 
 
-async def _post_log_entry(sub: dict, entry: dict, ticket_id: str) -> None:
+async def _post_log_entry(sub: dict, entry: dict, ticket_id: str, api_base: str, slack_client) -> None:
     body = _entry_body(entry)
     if not body:
         return  # nothing worth posting
 
-    ticket_url = f"{get_api_base()}/#/ticketing/ticket/{ticket_id}"
+    ticket_url = f"{api_base}/#/ticketing/ticket/{ticket_id}"
     link       = f"<{ticket_url}|#{ticket_id}>"
 
     # public=True entries are visible to the requester in NinjaOne portal;
@@ -355,12 +350,13 @@ async def _post_log_entry(sub: dict, entry: dict, ticket_id: str) -> None:
                 "text": {"type": "mrkdwn", "text": body},
             },
         ],
+        slack_client=slack_client,
     )
 
 
-async def _post_thread(sub: dict, *, text: str, blocks: list) -> None:
+async def _post_thread(sub: dict, *, text: str, blocks: list, slack_client) -> None:
     try:
-        await _get_slack_client().chat_postMessage(
+        await slack_client.chat_postMessage(
             channel=sub["slack_channel_id"],
             thread_ts=sub["slack_message_ts"],
             text=text,

@@ -22,20 +22,20 @@
 {% if not slack_configured %}
 <div class="alert alert-error" style="display:flex;align-items:center;justify-content:space-between;gap:1rem;">
   <span>Slack tokens are not configured. The bot cannot receive commands until setup is complete.</span>
-  <a href="/slack" class="btn btn-primary btn-sm" style="white-space:nowrap">Configure Slack &rarr;</a>
+  <a href="/{{ url_secret }}/slack" class="btn btn-primary btn-sm" style="white-space:nowrap">Configure Slack &rarr;</a>
 </div>
 {% endif %}
 {% if not ninja_configured %}
 <div class="alert alert-error" style="display:flex;align-items:center;justify-content:space-between;gap:1rem;">
   <span>NinjaOne credentials are not configured. Commands will not work until setup is complete.</span>
-  <a href="/setup" class="btn btn-primary btn-sm" style="white-space:nowrap">Run setup &rarr;</a>
+  <a href="/{{ url_secret }}/setup" class="btn btn-primary btn-sm" style="white-space:nowrap">Run setup &rarr;</a>
 </div>
 {% endif %}
 
 <div class="card">
   <div class="page-header">
     <h2>Registered commands</h2>
-    <a href="/command/new" class="btn btn-primary">+ Add command</a>
+    <a href="/{{ url_secret }}/command/new" class="btn btn-primary">+ Add command</a>
   </div>
 
   {% if commands %}
@@ -81,8 +81,8 @@
         </td>
         <td>
           <div class="actions">
-            <a href="/command/{{ cmd | urlencode }}/edit" class="btn btn-secondary btn-sm">Edit</a>
-            <form method="post" action="/command/{{ cmd | urlencode }}/delete"
+            <a href="/{{ url_secret }}/command/{{ cmd | urlencode }}/edit" class="btn btn-secondary btn-sm">Edit</a>
+            <form method="post" action="/{{ url_secret }}/command/{{ cmd | urlencode }}/delete"
                   onsubmit="return confirm('Delete {{ cmd }}?')">
               <button type="submit" class="btn btn-danger btn-sm">Delete</button>
             </form>
@@ -95,7 +95,7 @@
   {% else %}
   <div class="empty">
     <p>No commands registered yet.</p>
-    <a href="/command/new" class="btn btn-primary">Add your first command</a>
+    <a href="/{{ url_secret }}/command/new" class="btn btn-primary">Add your first command</a>
   </div>
   {% endif %}
 </div>

@@ -19,11 +19,11 @@ import aiosqlite
 DB_PATH = os.environ.get("DB_PATH", "/app/data/submissions.db")
 
 
-async def init_db() -> None:
+async def init_db(db_path: str = DB_PATH) -> None:
     """Create tables and migrate from the legacy single-table schema. Safe to call on every startup."""
-    os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
+    os.makedirs(os.path.dirname(db_path), exist_ok=True)
 
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with aiosqlite.connect(db_path) as db:
         await db.execute("""
             CREATE TABLE IF NOT EXISTS tickets (
                 ninja_ticket_id   TEXT PRIMARY KEY,
@@ -105,6 +105,7 @@ async def save_submission(
     subject: str = "",
     command: str = "",
     dedup_key: str = "",
+    db_path: str = DB_PATH,
 ) -> None:
     """
     Register a Slack thread as a watcher for a NinjaOne ticket.
@@ -114,7 +115,7 @@ async def save_submission(
     row is added so future updates fan out to both Slack threads.
     """
     tid = str(ninja_ticket_id)
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with aiosqlite.connect(db_path) as db:
         # Ensure the ticket row exists; preserve existing polling cursor.
         await db.execute(
             "INSERT OR IGNORE INTO tickets (ninja_ticket_id, dedup_key) VALUES (?, ?)",
@@ -133,7 +134,7 @@ async def save_submission(
         await db.commit()
 
 
-async def get_open_ticket_by_dedup_key(key: str) -> dict | None:
+async def get_open_ticket_by_dedup_key(key: str, db_path: str = DB_PATH) -> dict | None:
     """
     Return an open ticket whose dedup_key matches key, or None.
 
@@ -143,7 +144,7 @@ async def get_open_ticket_by_dedup_key(key: str) -> dict | None:
     """
     if not key:
         return None
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with aiosqlite.connect(db_path) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             "SELECT * FROM tickets WHERE dedup_key = ? AND closed = 0 LIMIT 1",
@@ -153,9 +154,9 @@ async def get_open_ticket_by_dedup_key(key: str) -> dict | None:
             return dict(row) if row else None
 
 
-async def get_all_open_tickets() -> list[dict]:
+async def get_all_open_tickets(db_path: str = DB_PATH) -> list[dict]:
     """Return all ticket rows that have not been marked closed."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with aiosqlite.connect(db_path) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             "SELECT * FROM tickets WHERE closed = 0 ORDER BY created_at"
@@ -163,9 +164,9 @@ async def get_all_open_tickets() -> list[dict]:
             return [dict(row) async for row in cursor]
 
 
-async def get_threads_for_ticket(ninja_ticket_id: str | int) -> list[dict]:
+async def get_threads_for_ticket(ninja_ticket_id: str | int, db_path: str = DB_PATH) -> list[dict]:
     """Return all Slack thread rows for a given NinjaOne ticket."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with aiosqlite.connect(db_path) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             "SELECT * FROM threads WHERE ninja_ticket_id = ? ORDER BY created_at",
@@ -181,6 +182,7 @@ async def update_ticket_seen(
     last_activity_id: str | None = None,
     last_activity_ts: float | None = None,
     closed: bool | None = None,
+    db_path: str = DB_PATH,
 ) -> None:
     """Update the polling cursor for a ticket. Only provided fields are written."""
     fields, values = [], []
@@ -195,7 +197,7 @@ async def update_ticket_seen(
     if not fields:
         return
     values.append(str(ninja_ticket_id))
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with aiosqlite.connect(db_path) as db:
         await db.execute(
             f"UPDATE tickets SET {', '.join(fields)} WHERE ninja_ticket_id = ?",
             values,

@@ -19,24 +19,22 @@ GET  /slack                   Slack token entry form
 POST /slack                   save Slack bot + app tokens
 """
 
+import hashlib
+import hmac
 import json
 import os
 import secrets
+import time as _time
 from pathlib import Path
 from urllib.parse import quote, unquote
 
 import httpx
-from fastapi import FastAPI, Form, HTTPException, Request
+from fastapi import APIRouter, Depends, FastAPI, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 
 from registry import load_registry, save_registry
-from signals import trigger_slack_reconnect
-from ninja_auth import (
-    ninja_headers, is_configured, get_api_base, save_credentials,
-    data_dir, encrypt_data, decrypt_data, encryption_enabled,
-    is_slack_configured, load_slack_config, save_slack_config,
-)
+from tenant import Tenant, TenantManager
 from schema_mapper import _extract_fields_list, _resolve_field_type, _is_field_required
 
 ADMIN_BASE_URL = os.environ.get("ADMIN_BASE_URL", "").rstrip("/")
@@ -45,53 +43,64 @@ _templates = Jinja2Templates(directory=Path(__file__).parent / "templates")
 
 admin_app = FastAPI(title="Eng Assist Admin", docs_url=None, redoc_url=None)
 
-
 # ---------------------------------------------------------------------------
-# Setup pending-state helpers (server-side; client never sees the secret)
+# Session helpers — HMAC-signed cookie
 # ---------------------------------------------------------------------------
 
-def _pending_path() -> str:
-    return os.path.join(data_dir(), "setup_pending.json")
+_SESSION_KEY = os.environ.get("ENCRYPTION_KEY", "") or "dev-session-key"
+_SESSION_TTL = 86400 * 7  # 7 days
 
 
-def _write_pending(data: dict) -> None:
-    path = _pending_path()
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    payload = (
-        {"_enc": True, "data": encrypt_data(json.dumps(data))}
-        if encryption_enabled() else data
-    )
-    tmp = path + ".tmp"
-    with open(tmp, "w") as f:
-        json.dump(payload, f, indent=2)
-    os.replace(tmp, path)
+def _make_session_cookie(tenant_id: str) -> str:
+    expires = int(_time.time()) + _SESSION_TTL
+    payload = f"{tenant_id}:{expires}"
+    sig = hmac.new(_SESSION_KEY.encode(), payload.encode(), hashlib.sha256).hexdigest()
+    return f"{payload}:{sig}"
+
+
+def _valid_session(cookie: str | None, tenant_id: str) -> bool:
+    if not cookie:
+        return False
     try:
-        os.chmod(path, 0o600)
-    except OSError:
-        pass
-
-
-def _read_pending() -> dict | None:
-    try:
-        with open(_pending_path()) as f:
-            stored = json.load(f)
-        if "_enc" in stored:
-            return json.loads(decrypt_data(stored["data"]))
-        return stored
-    except FileNotFoundError:
-        return None
+        parts = cookie.split(":", 2)
+        if len(parts) != 3:
+            return False
+        tid, expires_str, sig = parts
+        if tid != tenant_id:
+            return False
+        if int(expires_str) < int(_time.time()):
+            return False
+        payload = f"{tid}:{expires_str}"
+        expected = hmac.new(_SESSION_KEY.encode(), payload.encode(), hashlib.sha256).hexdigest()
+        return hmac.compare_digest(sig, expected)
     except Exception:
-        return None
+        return False
 
 
-def _delete_pending() -> None:
-    try:
-        os.unlink(_pending_path())
-    except FileNotFoundError:
-        pass
+# ---------------------------------------------------------------------------
+# Tenant dependency functions
+# ---------------------------------------------------------------------------
+
+async def get_tenant(url_secret: str, request: Request) -> Tenant:
+    mgr: TenantManager = request.app.state.tenant_manager
+    tenant = mgr.get(url_secret)
+    if not tenant:
+        raise HTTPException(404)
+    return tenant
 
 
-def _callback_url(request: Request) -> str:
+async def require_auth(
+    url_secret: str,
+    request: Request,
+    tenant: Tenant = Depends(get_tenant),
+) -> Tenant:
+    session = request.cookies.get("session")
+    if not _valid_session(session, tenant.id):
+        raise HTTPException(303, headers={"Location": f"/{url_secret}/login"})
+    return tenant
+
+
+def _callback_url(request: Request, url_secret: str) -> str:
     """
     Return the absolute OAuth callback URL.
 
@@ -99,31 +108,32 @@ def _callback_url(request: Request) -> str:
     Tunnel where request.base_url reflects the internal address, not the public
     one that NinjaOne will redirect to).
     """
-    if ADMIN_BASE_URL:
-        return ADMIN_BASE_URL.rstrip("/") + "/oauth/callback"
-    return f"{request.url.scheme}://{request.url.netloc}/oauth/callback"
+    base = ADMIN_BASE_URL or f"{request.url.scheme}://{request.url.netloc}"
+    return f"{base}/{url_secret}/oauth/callback"
 
 
 # ---------------------------------------------------------------------------
 # NinjaOne data helpers
 # ---------------------------------------------------------------------------
 
-async def _fetch_forms() -> list[dict]:
-    async with httpx.AsyncClient(timeout=15) as http:
-        hdrs = await ninja_headers(http)
-        resp = await http.get(f"{get_api_base()}/v2/ticketing/ticket-form", headers=hdrs)
-        resp.raise_for_status()
-        data = resp.json()
-        return data if isinstance(data, list) else []
+async def _fetch_forms(tenant: Tenant) -> list[dict]:
+    hdrs = await tenant.ninja_auth.headers(tenant.http_client)
+    resp = await tenant.http_client.get(
+        f"{tenant.ninja_auth.get_api_base()}/v2/ticketing/ticket-form", headers=hdrs
+    )
+    resp.raise_for_status()
+    data = resp.json()
+    return data if isinstance(data, list) else []
 
 
-async def _fetch_orgs() -> list[dict]:
-    async with httpx.AsyncClient(timeout=15) as http:
-        hdrs = await ninja_headers(http)
-        resp = await http.get(f"{get_api_base()}/v2/organizations", headers=hdrs)
-        resp.raise_for_status()
-        data = resp.json()
-        return data if isinstance(data, list) else []
+async def _fetch_orgs(tenant: Tenant) -> list[dict]:
+    hdrs = await tenant.ninja_auth.headers(tenant.http_client)
+    resp = await tenant.http_client.get(
+        f"{tenant.ninja_auth.get_api_base()}/v2/organizations", headers=hdrs
+    )
+    resp.raise_for_status()
+    data = resp.json()
+    return data if isinstance(data, list) else []
 
 
 # ---------------------------------------------------------------------------
@@ -188,23 +198,24 @@ _DEFAULT_SLACK_TYPE: dict[str, str] = {
 }
 
 
-@admin_app.get("/api/form-fields/{form_id}")
-async def api_form_fields(form_id: int) -> JSONResponse:
+tenant_router = APIRouter()
+
+
+@tenant_router.get("/api/form-fields/{form_id}")
+async def api_form_fields(form_id: int, tenant: Tenant = Depends(require_auth)) -> JSONResponse:
     """
     Return metadata for all visible fields in a NinjaOne ticket form.
 
     Used by the admin UI's field-overrides panel to populate the field list.
-    No auth required — Cloudflare Access covers the boundary.
     """
     try:
-        async with httpx.AsyncClient(timeout=15) as http:
-            hdrs = await ninja_headers(http)
-            resp = await http.get(
-                f"{get_api_base()}/v2/ticketing/ticket-form/{form_id}",
-                headers=hdrs,
-            )
-            resp.raise_for_status()
-            form_schema = resp.json()
+        hdrs = await tenant.ninja_auth.headers(tenant.http_client)
+        resp = await tenant.http_client.get(
+            f"{tenant.ninja_auth.get_api_base()}/v2/ticketing/ticket-form/{form_id}",
+            headers=hdrs,
+        )
+        resp.raise_for_status()
+        form_schema = resp.json()
     except Exception as exc:
         return JSONResponse({"fields": [], "error": str(exc)})
 
@@ -298,16 +309,18 @@ async def _parse_form_entries(form) -> list[dict]:
 # Routes — command management
 # ---------------------------------------------------------------------------
 
-@admin_app.get("/", response_class=HTMLResponse)
+@tenant_router.get("/", response_class=HTMLResponse)
 async def index(
     request: Request,
+    url_secret: str,
+    tenant: Tenant = Depends(require_auth),
     saved: str = "",
     deleted: str = "",
     error: str = "",
     setup: str = "",
     slack: str = "",
 ):
-    registry = load_registry()
+    registry = load_registry(data_dir=tenant.data_dir)
     commands = registry.get("commands", {})
     return _templates.TemplateResponse(request, "index.html", {
         "commands":         commands,
@@ -316,129 +329,153 @@ async def index(
         "error":            error,
         "setup_done":       setup == "done",
         "slack_done":       slack == "done",
-        "ninja_configured": is_configured(),
-        "slack_configured": is_slack_configured(),
+        "ninja_configured": tenant.ninja_auth.is_configured(),
+        "slack_configured": tenant.ninja_auth.is_slack_configured(),
+        "url_secret":       url_secret,
     })
 
 
-@admin_app.get("/command/new", response_class=HTMLResponse)
+@tenant_router.get("/command/new", response_class=HTMLResponse)
 async def new_command_form(
     request: Request,
+    url_secret: str,
+    tenant: Tenant = Depends(require_auth),
     error: str = "",
 ):
-    if not is_configured():
-        return RedirectResponse("/setup", status_code=303)
+    if not tenant.ninja_auth.is_configured():
+        return RedirectResponse(f"/{url_secret}/setup", status_code=303)
 
     try:
-        forms, orgs = await _fetch_forms(), await _fetch_orgs()
+        forms, orgs = await _fetch_forms(tenant), await _fetch_orgs(tenant)
     except Exception as exc:
         forms, orgs = [], []
         error = f"Could not load NinjaOne data: {exc}"
 
     return _templates.TemplateResponse(request, "command_form.html", {
-        "action":  "/command/new",
-        "editing": False,
-        "cmd":     "",
-        "entries": [{}],
-        "forms":   forms,
-        "orgs":    orgs,
-        "error":   error,
+        "action":     f"/{url_secret}/command/new",
+        "editing":    False,
+        "cmd":        "",
+        "entries":    [{}],
+        "forms":      forms,
+        "orgs":       orgs,
+        "error":      error,
+        "url_secret": url_secret,
     })
 
 
-@admin_app.post("/command/new")
-async def new_command_save(request: Request):
+@tenant_router.post("/command/new")
+async def new_command_save(
+    request: Request,
+    url_secret: str,
+    tenant: Tenant = Depends(require_auth),
+):
     form = await request.form()
     cmd = (form.get("command") or "").strip()
     if not cmd.startswith("/"):
         cmd = "/" + cmd
 
     entries = await _parse_form_entries(form)
-    registry = load_registry()
+    registry = load_registry(data_dir=tenant.data_dir)
     registry.setdefault("commands", {})[cmd] = entries if len(entries) > 1 else entries[0]
-    save_registry(registry)
-    return RedirectResponse(f"/?saved={quote(cmd)}", status_code=303)
+    save_registry(registry, data_dir=tenant.data_dir)
+    return RedirectResponse(f"/{url_secret}/?saved={quote(cmd)}", status_code=303)
 
 
-@admin_app.get("/command/{cmd:path}/edit", response_class=HTMLResponse)
+@tenant_router.get("/command/{cmd:path}/edit", response_class=HTMLResponse)
 async def edit_command_form(
     request: Request,
+    url_secret: str,
     cmd: str,
+    tenant: Tenant = Depends(require_auth),
     error: str = "",
 ):
     cmd = unquote(cmd)
-    registry = load_registry()
+    registry = load_registry(data_dir=tenant.data_dir)
     raw = registry.get("commands", {}).get(cmd)
     if raw is None:
         raise HTTPException(status_code=404, detail=f"Command {cmd!r} not found")
 
     try:
-        forms, orgs = await _fetch_forms(), await _fetch_orgs()
+        forms, orgs = await _fetch_forms(tenant), await _fetch_orgs(tenant)
     except Exception as exc:
         forms, orgs = [], []
         error = f"Could not load NinjaOne data: {exc}"
 
     return _templates.TemplateResponse(request, "command_form.html", {
-        "action":  f"/command/{quote(cmd, safe='')}/edit",
-        "editing": True,
-        "cmd":     cmd,
-        "entries": _entry_to_list(raw),
-        "forms":   forms,
-        "orgs":    orgs,
-        "error":   error,
+        "action":     f"/{url_secret}/command/{quote(cmd, safe='')}/edit",
+        "editing":    True,
+        "cmd":        cmd,
+        "entries":    _entry_to_list(raw),
+        "forms":      forms,
+        "orgs":       orgs,
+        "error":      error,
+        "url_secret": url_secret,
     })
 
 
-@admin_app.post("/command/{cmd:path}/edit")
-async def edit_command_save(cmd: str, request: Request):
+@tenant_router.post("/command/{cmd:path}/edit")
+async def edit_command_save(
+    cmd: str,
+    request: Request,
+    url_secret: str,
+    tenant: Tenant = Depends(require_auth),
+):
     cmd = unquote(cmd)
-    registry = load_registry()
+    registry = load_registry(data_dir=tenant.data_dir)
     if cmd not in registry.get("commands", {}):
         raise HTTPException(status_code=404, detail=f"Command {cmd!r} not found")
 
     form    = await request.form()
     entries = await _parse_form_entries(form)
     registry["commands"][cmd] = entries if len(entries) > 1 else entries[0]
-    save_registry(registry)
-    return RedirectResponse(f"/?saved={quote(cmd)}", status_code=303)
+    save_registry(registry, data_dir=tenant.data_dir)
+    return RedirectResponse(f"/{url_secret}/?saved={quote(cmd)}", status_code=303)
 
 
-@admin_app.post("/command/{cmd:path}/delete")
+@tenant_router.post("/command/{cmd:path}/delete")
 async def delete_command(
     cmd: str,
+    request: Request,
+    url_secret: str,
+    tenant: Tenant = Depends(require_auth),
 ):
     cmd = unquote(cmd)
-    registry = load_registry()
+    registry = load_registry(data_dir=tenant.data_dir)
     registry.get("commands", {}).pop(cmd, None)
-    save_registry(registry)
-    return RedirectResponse(f"/?deleted={quote(cmd)}", status_code=303)
+    save_registry(registry, data_dir=tenant.data_dir)
+    return RedirectResponse(f"/{url_secret}/?deleted={quote(cmd)}", status_code=303)
 
 
 # ---------------------------------------------------------------------------
 # Routes — NinjaOne setup
 # ---------------------------------------------------------------------------
 
-@admin_app.get("/setup", response_class=HTMLResponse)
+@tenant_router.get("/setup", response_class=HTMLResponse)
 async def setup_page(
     request: Request,
+    url_secret: str,
+    tenant: Tenant = Depends(require_auth),
     error: str = "",
 ):
     return _templates.TemplateResponse(request, "setup.html", {
-        "configured":   is_configured(),
-        "callback_url": _callback_url(request),
+        "configured":   tenant.ninja_auth.is_configured(),
+        "callback_url": _callback_url(request, url_secret),
         "error":        error,
+        "url_secret":   url_secret,
     })
 
 
-@admin_app.post("/setup/start")
+@tenant_router.post("/setup/start")
 async def setup_start(
     request: Request,
+    url_secret: str,
+    tenant: Tenant = Depends(require_auth),
     api_base:      str = Form(...),
     client_id:     str = Form(...),
     client_secret: str = Form(...),
 ):
     api_base     = api_base.rstrip("/")
-    redirect_uri = _callback_url(request)
+    redirect_uri = _callback_url(request, url_secret)
     state        = secrets.token_urlsafe(16)
 
     auth_url = (
@@ -449,7 +486,7 @@ async def setup_start(
         f"&scope=monitoring+management+offline_access"
         f"&state={state}"
     )
-    _write_pending({
+    tenant.ninja_auth.write_pending({
         "api_base":      api_base,
         "client_id":     client_id,
         "client_secret": client_secret,
@@ -460,38 +497,42 @@ async def setup_start(
     return RedirectResponse(auth_url, status_code=303)
 
 
-@admin_app.get("/oauth/callback")
-async def oauth_callback(request: Request):
+@tenant_router.get("/oauth/callback")
+async def oauth_callback(
+    request: Request,
+    url_secret: str,
+    tenant: Tenant = Depends(get_tenant),
+):
     """
     Receives the authorization code from NinjaOne after the user approves.
-    No HTTP Basic Auth — the browser arrives here via redirect from NinjaOne.
+    No session cookie required — the browser arrives here via redirect from NinjaOne.
     Security is provided by the state parameter matched against the pending file.
     """
     # NinjaOne may return an error (e.g. user denied access)
     error_param = request.query_params.get("error")
     if error_param:
         desc = request.query_params.get("error_description", error_param)
-        return RedirectResponse(f"/setup?error={quote(desc)}", status_code=303)
+        return RedirectResponse(f"/{url_secret}/setup?error={quote(desc)}", status_code=303)
 
     code  = request.query_params.get("code", "")
     state = request.query_params.get("state", "")
 
     if not code:
         return RedirectResponse(
-            f"/setup?error={quote('No authorisation code received from NinjaOne.')}",
+            f"/{url_secret}/setup?error={quote('No authorisation code received from NinjaOne.')}",
             status_code=303,
         )
 
-    pending = _read_pending()
+    pending = tenant.ninja_auth.read_pending()
     if not pending:
         return RedirectResponse(
-            f"/setup?error={quote('Setup session not found — please start over.')}",
+            f"/{url_secret}/setup?error={quote('Setup session not found — please start over.')}",
             status_code=303,
         )
 
     if state != pending.get("state", ""):
         return RedirectResponse(
-            f"/setup?error={quote('State mismatch — please start over.')}",
+            f"/{url_secret}/setup?error={quote('State mismatch — please start over.')}",
             status_code=303,
         )
 
@@ -525,7 +566,7 @@ async def oauth_callback(request: Request):
                 if resp_body else resp.text[:500]
             )
             msg = f"Token exchange failed (HTTP {resp.status_code}): {detail}"
-            return RedirectResponse(f"/setup?error={quote(msg)}", status_code=303)
+            return RedirectResponse(f"/{url_secret}/setup?error={quote(msg)}", status_code=303)
 
         refresh_token = (resp_body or {}).get("refresh_token", "")
 
@@ -535,42 +576,48 @@ async def oauth_callback(request: Request):
                 f"Token exchange succeeded (HTTP 200) but the response did not include a "
                 f"refresh_token. Response body: {body_preview}"
             )
-            return RedirectResponse(f"/setup?error={quote(msg)}", status_code=303)
+            return RedirectResponse(f"/{url_secret}/setup?error={quote(msg)}", status_code=303)
 
-        save_credentials({
+        tenant.ninja_auth.save_credentials({
             "client_id":     client_id,
             "client_secret": client_secret,
             "api_base":      api_base,
             "refresh_token": refresh_token,
         })
-        _delete_pending()
-        return RedirectResponse("/?setup=done", status_code=303)
+        tenant.ninja_auth.delete_pending()
+        return RedirectResponse(f"/{url_secret}/?setup=done", status_code=303)
 
     except Exception as exc:
         msg = f"Unexpected error during token exchange: {exc}"
-        return RedirectResponse(f"/setup?error={quote(msg)}", status_code=303)
+        return RedirectResponse(f"/{url_secret}/setup?error={quote(msg)}", status_code=303)
 
 
 # ---------------------------------------------------------------------------
 # Routes — Slack token setup
 # ---------------------------------------------------------------------------
 
-@admin_app.get("/slack", response_class=HTMLResponse)
+@tenant_router.get("/slack", response_class=HTMLResponse)
 async def slack_page(
     request: Request,
+    url_secret: str,
+    tenant: Tenant = Depends(require_auth),
     error: str = "",
 ):
-    cfg = load_slack_config()
+    cfg = tenant.ninja_auth.load_slack_config()
     return _templates.TemplateResponse(request, "slack.html", {
-        "configured": is_slack_configured(),
+        "configured": tenant.ninja_auth.is_slack_configured(),
         "bot_token":  cfg.get("bot_token", ""),
         "app_token":  cfg.get("app_token", ""),
         "error":      error,
+        "url_secret": url_secret,
     })
 
 
-@admin_app.post("/slack")
+@tenant_router.post("/slack")
 async def slack_save(
+    request: Request,
+    url_secret: str,
+    tenant: Tenant = Depends(require_auth),
     bot_token: str = Form(...),
     app_token: str = Form(...),
 ):
@@ -579,15 +626,70 @@ async def slack_save(
 
     if not bot_token.startswith("xoxb-"):
         return RedirectResponse(
-            f"/slack?error={quote('Bot token must start with xoxb-')}",
+            f"/{url_secret}/slack?error={quote('Bot token must start with xoxb-')}",
             status_code=303,
         )
     if not app_token.startswith("xapp-"):
         return RedirectResponse(
-            f"/slack?error={quote('App-level token must start with xapp-')}",
+            f"/{url_secret}/slack?error={quote('App-level token must start with xapp-')}",
             status_code=303,
         )
 
-    save_slack_config({"bot_token": bot_token, "app_token": app_token})
-    trigger_slack_reconnect()
-    return RedirectResponse("/?slack=done", status_code=303)
+    tenant.ninja_auth.save_slack_config({"bot_token": bot_token, "app_token": app_token})
+    tenant.reconnect_event.set()
+    return RedirectResponse(f"/{url_secret}/?slack=done", status_code=303)
+
+
+# ---------------------------------------------------------------------------
+# Routes — auth (login / logout)
+# ---------------------------------------------------------------------------
+
+@tenant_router.get("/login", response_class=HTMLResponse)
+async def login_page(
+    url_secret: str,
+    request: Request,
+    error: str = "",
+):
+    tenant = await get_tenant(url_secret, request)
+    if _valid_session(request.cookies.get("session"), tenant.id):
+        return RedirectResponse(f"/{url_secret}/", status_code=303)
+    return _templates.TemplateResponse(request, "login.html", {
+        "url_secret": url_secret,
+        "error":      error,
+    })
+
+
+@tenant_router.post("/login")
+async def login_post(
+    url_secret: str,
+    request: Request,
+):
+    tenant = await get_tenant(url_secret, request)
+    form = await request.form()
+    password = str(form.get("password") or "")
+    if not tenant.verify_password(password):
+        return RedirectResponse(
+            f"/{url_secret}/login?error={quote('Invalid password')}",
+            status_code=303,
+        )
+    cookie_value = _make_session_cookie(tenant.id)
+    response = RedirectResponse(f"/{url_secret}/", status_code=303)
+    response.set_cookie(
+        "session", cookie_value,
+        httponly=True, samesite="lax", max_age=_SESSION_TTL,
+    )
+    return response
+
+
+@tenant_router.get("/logout")
+async def logout(url_secret: str):
+    response = RedirectResponse(f"/{url_secret}/login", status_code=303)
+    response.delete_cookie("session")
+    return response
+
+
+# ---------------------------------------------------------------------------
+# Mount tenant router
+# ---------------------------------------------------------------------------
+
+admin_app.include_router(tenant_router, prefix="/{url_secret}")

@@ -36,7 +36,7 @@
 <div class="card">
   <div class="page-header">
     <h2>Slack Tokens</h2>
-    <a href="/" class="btn btn-secondary btn-sm">Cancel</a>
+    <a href="/{{ url_secret }}/" class="btn btn-secondary btn-sm">Cancel</a>
   </div>
 
   <p style="margin-bottom:1.25rem;color:#4b5563;font-size:.9rem;">
@@ -45,7 +45,7 @@
     no container restart required.
   </p>
 
-  <form method="post" action="/slack" class="form-grid">
+  <form method="post" action="/{{ url_secret }}/slack" class="form-grid">
     <div class="form-group">
       <label for="bot_token">
         Bot token
@@ -66,7 +66,7 @@
 
     <div class="form-actions">
       <button type="submit" class="btn btn-primary">Save tokens</button>
-      <a href="/" class="btn btn-secondary">Cancel</a>
+      <a href="/{{ url_secret }}/" class="btn btn-secondary">Cancel</a>
     </div>
   </form>
 </div>
