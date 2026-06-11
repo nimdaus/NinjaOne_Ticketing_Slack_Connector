@@ -267,7 +267,8 @@ async def _build_form_modal(entry: dict, channel_id: str, cmd: str) -> dict | No
         logger.error("Failed to fetch form schema form=%s: %s", entry.get("ticketFormId"), exc)
         return None
 
-    blocks = build_blocks_from_schema(form_schema)
+    field_overrides = entry.get("fieldOverrides", {})
+    blocks = build_blocks_from_schema(form_schema, field_overrides)
     if not blocks:
         logger.warning("No blocks generated for form %s", entry.get("ticketFormId"))
         return None
@@ -289,6 +290,7 @@ async def _build_form_modal(entry: dict, channel_id: str, cmd: str) -> dict | No
             "ticketFormId":   entry["ticketFormId"],
             "clientId":       entry["clientId"],
             "defaultSubject": entry.get("defaultSubject", ""),
+            "fieldOverrides": field_overrides,
         }),
         "blocks": blocks,
     }
@@ -448,6 +450,7 @@ async def handle_dynamic_submission(ack, body, client, view):
     ticket_form_id = metadata.get("ticketFormId")
     client_id = metadata.get("clientId")
     default_subject = metadata.get("defaultSubject", "")
+    field_overrides = metadata.get("fieldOverrides", {})
 
     logger.info(
         "Dynamic form submission: cmd=%s user=%s form=%s",
@@ -461,6 +464,7 @@ async def handle_dynamic_submission(ack, body, client, view):
         _process_dynamic_submission(
             client, user_id, channel_id, cmd,
             ticket_form_id, client_id, default_subject, values,
+            field_overrides=field_overrides,
         )
     )
 
@@ -474,6 +478,7 @@ async def _process_dynamic_submission(
     client_id: int,
     default_subject: str,
     values: dict,
+    field_overrides: dict | None = None,
 ):
     """Create a NinjaOne ticket from the dynamic form submission."""
     async with httpx.AsyncClient(timeout=30) as http:
@@ -482,7 +487,7 @@ async def _process_dynamic_submission(
             form_schema = await _fetch_form_schema(http, ticket_form_id)
 
             # Extract submitted values — list of {id, label, value} per field
-            submitted = extract_values_from_submission(values, form_schema)
+            submitted = extract_values_from_submission(values, form_schema, field_overrides)
 
             # Non-empty fields only
             filled_list = [f for f in submitted if f["value"]]

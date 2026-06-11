@@ -296,7 +296,10 @@ def _extract_options(field: dict) -> list[dict]:
 # ---------------------------------------------------------------------------
 
 
-def build_blocks_from_schema(form_schema: dict) -> list[dict]:
+def build_blocks_from_schema(
+    form_schema: dict,
+    field_overrides: dict | None = None,
+) -> list[dict]:
     """
     Convert a NinjaOne ticket form schema into Slack Block Kit blocks.
 
@@ -304,6 +307,9 @@ def build_blocks_from_schema(form_schema: dict) -> list[dict]:
         form_schema: The full response from GET /v2/ticketing/ticket-form/{id},
                      or at minimum a dict with a "fields" key containing field
                      definitions.
+        field_overrides: Optional dict of field-id → override settings from the
+                         admin UI.  ``{"included": false}`` hides a field;
+                         ``{"slackType": "..."}`` changes its Slack widget.
 
     Returns:
         List of Slack Block Kit block dicts ready for a modal view.
@@ -324,7 +330,7 @@ def build_blocks_from_schema(form_schema: dict) -> list[dict]:
     logger.info("Mapping %d form fields to Block Kit blocks", len(fields))
 
     for field in fields:
-        block = _field_to_block(field)
+        block = _field_to_block(field, field_overrides=field_overrides)
         if block:
             blocks.append(block)
 
@@ -332,7 +338,9 @@ def build_blocks_from_schema(form_schema: dict) -> list[dict]:
 
 
 def extract_values_from_submission(
-    view_values: dict, form_schema: dict
+    view_values: dict,
+    form_schema: dict,
+    field_overrides: dict | None = None,
 ) -> list[dict]:
     """
     Extract submitted values from a Slack modal view.
@@ -347,13 +355,17 @@ def extract_values_from_submission(
 
     Callers build the description body from (label, value) pairs and the
     NinjaOne fields payload from (id, value) pairs.
+
+    Args:
+        field_overrides: Optional dict of field-id → override settings.
+                         Fields marked ``{"included": false}`` are skipped
+                         unless they are required.
     """
     fields = _extract_fields_list(form_schema)
     result: list[dict] = []
 
     for field in fields:
         field_id = str(field.get("id") or field.get("fieldId") or field.get("name", ""))
-        block_id = f"field_{field_id}"
         label = str(
             field.get("label")
             or field.get("name")
@@ -361,6 +373,17 @@ def extract_values_from_submission(
             or field_id
         )
 
+        # Determine if the field is required (required fields are never excluded)
+        is_required = field.get("required", False)
+        if isinstance(is_required, str):
+            is_required = is_required.lower() in ("true", "1", "yes")
+
+        # Skip excluded fields (unless required)
+        override = (field_overrides or {}).get(str(field_id), {})
+        if override.get("included") is False and not is_required:
+            continue
+
+        block_id = f"field_{field_id}"
         block_data = view_values.get(block_id, {})
         action_data = block_data.get("value", {})
         value = _extract_single_value(action_data) if action_data else ""
@@ -406,8 +429,26 @@ def _extract_fields_list(form_schema: dict) -> list[dict]:
     return []
 
 
-def _field_to_block(field: dict) -> dict | None:
-    """Convert a single NinjaOne field definition to a Slack input block."""
+# Maps override slackType strings (from the admin UI) to element builder functions.
+_OVERRIDE_TYPE_MAP: dict[str, callable] = {
+    "plain_text_input":           _build_text_element,
+    "plain_text_input_multiline": _build_multiline_element,
+    "static_select":              _build_dropdown_element,
+    "multi_static_select":        _build_multi_select_element,
+    "datepicker":                 _build_date_element,
+    "checkboxes":                 _build_checkbox_element,
+    "number_input":               _build_number_element,
+}
+
+
+def _field_to_block(field: dict, field_overrides: dict | None = None) -> dict | None:
+    """Convert a single NinjaOne field definition to a Slack input block.
+
+    Args:
+        field_overrides: Optional dict of field-id → override settings.
+                         ``{"included": false}`` skips the field (unless required).
+                         ``{"slackType": "..."}`` replaces the default element builder.
+    """
     field_type = str(
         field.get("type")
         or field.get("fieldType")
@@ -428,8 +469,34 @@ def _field_to_block(field: dict) -> dict | None:
         logger.debug("Skipping hidden/system field: %s", label)
         return None
 
-    # Resolve builder — fallback to text input for unknown types
-    builder = _TYPE_MAP.get(field_type)
+    # Determine if the field is required (must be known before override checks)
+    is_required = field.get("required", False)
+    if isinstance(is_required, str):
+        is_required = is_required.lower() in ("true", "1", "yes")
+
+    # Apply field overrides
+    override = (field_overrides or {}).get(str(field_id), {})
+
+    # included: false → skip the field, but never skip required fields
+    if override.get("included") is False and not is_required:
+        logger.debug("Skipping excluded field (override): %s", label)
+        return None
+
+    # slackType override → swap the element builder
+    override_slack_type = override.get("slackType")
+    if override_slack_type:
+        builder = _OVERRIDE_TYPE_MAP.get(override_slack_type)
+        if builder is None:
+            logger.warning(
+                "Unknown override slackType '%s' for field '%s' — "
+                "falling back to NinjaOne type mapping",
+                override_slack_type,
+                label,
+            )
+            builder = _TYPE_MAP.get(field_type)
+    else:
+        builder = _TYPE_MAP.get(field_type)
+
     if builder is None:
         logger.warning(
             "Unknown NinjaOne field type '%s' for field '%s' — "
@@ -440,11 +507,6 @@ def _field_to_block(field: dict) -> dict | None:
         builder = _build_text_element
 
     element = builder(field)
-
-    # Determine if the field is required
-    is_required = field.get("required", False)
-    if isinstance(is_required, str):
-        is_required = is_required.lower() in ("true", "1", "yes")
 
     block = {
         "type": "input",

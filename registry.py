@@ -22,8 +22,6 @@ def load_registry() -> dict:
 
 def save_registry(registry: dict) -> None:
     path = _registry_path()
-    tmp = path + ".tmp"
-    with open(tmp, "w") as f:
+    with open(path, "w") as f:
         json.dump(registry, f, indent=2)
-    os.replace(tmp, path)
     logger.info("Registry saved to %s", path)

@@ -27,7 +27,7 @@ from urllib.parse import quote, unquote
 
 import httpx
 from fastapi import FastAPI, Form, HTTPException, Request
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 
 from registry import load_registry, save_registry
@@ -37,6 +37,7 @@ from ninja_auth import (
     data_dir, encrypt_data, decrypt_data, encryption_enabled,
     is_slack_configured, load_slack_config, save_slack_config,
 )
+from schema_mapper import _extract_fields_list
 
 ADMIN_BASE_URL = os.environ.get("ADMIN_BASE_URL", "").rstrip("/")
 
@@ -126,6 +127,129 @@ async def _fetch_orgs() -> list[dict]:
 
 
 # ---------------------------------------------------------------------------
+# Form-fields API — used by the admin UI's field-overrides panel
+# ---------------------------------------------------------------------------
+
+# Maps NinjaOne field type (uppercased) to the Slack element type string that
+# appears in the field-overrides UI.  This is a UI-facing description of the
+# *default* Slack widget; it intentionally diverges from _TYPE_MAP in a few
+# places (e.g. EMAIL/URL/TIME/DATE_TIME all surface as plain_text_input here
+# because their native Slack counterparts are not user-overridable).
+_DEFAULT_SLACK_TYPE: dict[str, str] = {
+    # Plain text
+    "TEXT":                               "plain_text_input",
+    "TEXTFIELD":                          "plain_text_input",
+    "TEXT_FIELD":                         "plain_text_input",
+    "SHORT_TEXT":                         "plain_text_input",
+    "STRING":                             "plain_text_input",
+    "PHONE":                              "plain_text_input",
+    "IP_ADDRESS":                         "plain_text_input",
+    "IPADDRESS":                          "plain_text_input",
+    "TOTP":                               "plain_text_input",
+    "ATTACHMENT":                         "plain_text_input",
+    "EMAIL":                              "plain_text_input",
+    "URL":                                "plain_text_input",
+    "LINK":                               "plain_text_input",
+    "TIME":                               "plain_text_input",
+    # Multiline
+    "WYSIWYG":                            "plain_text_input_multiline",
+    "TEXTAREA":                           "plain_text_input_multiline",
+    "LONG_TEXT":                          "plain_text_input_multiline",
+    "MULTILINE":                          "plain_text_input_multiline",
+    # Dropdowns
+    "DROPDOWN":                           "static_select",
+    "SELECT":                             "static_select",
+    "ENUM":                               "static_select",
+    "SINGLE_SELECT":                      "static_select",
+    "DEVICE_DROPDOWN":                    "static_select",
+    "ORGANIZATION_DROPDOWN":              "static_select",
+    "ORGANIZATION_LOCATION_DROPDOWN":     "static_select",
+    # Multi-select
+    "MULTI_SELECT":                       "multi_static_select",
+    "MULTI_DROPDOWN":                     "multi_static_select",
+    "MULTISELECT":                        "multi_static_select",
+    "DEVICE_MULTI_SELECT":                "multi_static_select",
+    "ORGANIZATION_MULTI_SELECT":          "multi_static_select",
+    "ORGANIZATION_LOCATION_MULTI_SELECT": "multi_static_select",
+    # Boolean
+    "CHECKBOX":                           "checkboxes",
+    "BOOLEAN":                            "checkboxes",
+    "BOOL":                               "checkboxes",
+    # Date / datetime (datetimepicker is not user-overridable — surface as datepicker)
+    "DATE":                               "datepicker",
+    "DATEPICKER":                         "datepicker",
+    "DATE_TIME":                          "datepicker",
+    "DATETIME":                           "datepicker",
+    # Numeric
+    "NUMERIC":                            "number_input",
+    "NUMBER":                             "number_input",
+    "INTEGER":                            "number_input",
+    "DECIMAL":                            "number_input",
+}
+
+
+@admin_app.get("/api/form-fields/{form_id}")
+async def api_form_fields(form_id: int) -> JSONResponse:
+    """
+    Return metadata for all visible fields in a NinjaOne ticket form.
+
+    Used by the admin UI's field-overrides panel to populate the field list.
+    No auth required — Cloudflare Access covers the boundary.
+    """
+    try:
+        async with httpx.AsyncClient(timeout=15) as http:
+            hdrs = await ninja_headers(http)
+            resp = await http.get(
+                f"{get_api_base()}/v2/ticketing/ticket-form/{form_id}",
+                headers=hdrs,
+            )
+            resp.raise_for_status()
+            form_schema = resp.json()
+    except Exception as exc:
+        return JSONResponse({"fields": [], "error": str(exc)})
+
+    fields_raw = _extract_fields_list(form_schema)
+    fields_out = []
+    for field in fields_raw:
+        # Skip hidden / system fields (same logic as _field_to_block)
+        if field.get("hidden") or field.get("systemField"):
+            continue
+
+        field_id = str(
+            field.get("id") or field.get("fieldId") or field.get("name", "")
+        )
+        label = str(
+            field.get("label")
+            or field.get("name")
+            or field.get("displayName")
+            or field_id
+        )
+
+        ninja_type = str(
+            field.get("type")
+            or field.get("fieldType")
+            or field.get("uiType")
+            or "TEXT"
+        ).upper()
+
+        default_slack_type = _DEFAULT_SLACK_TYPE.get(ninja_type, "plain_text_input")
+
+        is_required = field.get("required", False)
+        if isinstance(is_required, str):
+            is_required = is_required.lower() in ("true", "1", "yes")
+
+        fields_out.append({
+            "id":               field_id,
+            "label":            label,
+            "ninjaType":        ninja_type,
+            "defaultSlackType": default_slack_type,
+            "required":         bool(is_required),
+        })
+
+    return JSONResponse({"fields": fields_out})
+
+
+# ---------------------------------------------------------------------------
 # Command registry helpers
 # ---------------------------------------------------------------------------
 
@@ -163,6 +287,18 @@ async def _parse_form_entries(form) -> list[dict]:
         label = (form.get(f"label_{i}") or "").strip()
         if label:
             entry["label"] = label
+
+        raw_overrides = form.get(f"field_overrides_{i}") or ""
+        if raw_overrides:
+            try:
+                parsed_overrides = json.loads(raw_overrides)
+            except (ValueError, TypeError):
+                parsed_overrides = {}
+        else:
+            parsed_overrides = {}
+        if parsed_overrides:
+            entry["fieldOverrides"] = parsed_overrides
+
         entries.append(entry)
     return entries
 

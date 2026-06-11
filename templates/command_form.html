@@ -19,6 +19,14 @@
   }
   .entry-label { font-size: .8rem; font-weight: 600; color: #6b7280; text-transform: uppercase; letter-spacing: .05em; }
   .entry-divider { border: none; border-top: 1px solid #e5e7eb; margin: 1rem 0; }
+  .field-config-table { margin-top: .75rem; }
+  .field-config-table table { width: 100%; border-collapse: collapse; font-size: .82rem; }
+  .field-config-table th { text-align: left; font-size: .72rem; font-weight: 600; text-transform: uppercase; letter-spacing: .06em; color: #6b7280; padding: .4rem .5rem; border-bottom: 1px solid #e5e7eb; }
+  .field-config-table td { padding: .4rem .5rem; vertical-align: middle; border-bottom: 1px solid #f3f4f6; }
+  .field-config-table tr:last-child td { border-bottom: none; }
+  .field-config-table select { padding: .3rem .5rem; font-size: .8rem; border: 1px solid #d1d5db; border-radius: 4px; }
+  .field-config-table .req { color: #ef4444; margin-left: .15rem; font-weight: 700; }
+  .field-config-loading { font-size: .82rem; color: #9ca3af; margin-top: .5rem; padding: .4rem 0; }
 </style>
 
 <div class="card">
@@ -57,7 +65,7 @@
     <div id="entries-container">
       {% for e in entries %}
       {% set i = loop.index0 %}
-      <div class="entry-row">
+      <div class="entry-row" data-overrides='{{ (e.get("fieldOverrides") or {}) | tojson }}'>
         <div class="entry-header">
           <span class="entry-label" data-entry-num>Form {{ i + 1 }}</span>
           <button type="button" class="btn btn-danger btn-sm remove-btn"
@@ -97,6 +105,7 @@
             {% endif %}
             <input type="hidden" name="ticket_form_name_{{ i }}" class="form-name-hidden"
                    value="{{ e.ticketFormName or '' }}">
+            <div class="field-config-table"></div>
           </div>
 
           <!-- Organisation -->
@@ -135,6 +144,10 @@
           </div>
 
         </div>
+
+        <!-- Field overrides (JSON blob submitted with the form) -->
+        <input type="hidden" name="field_overrides_{{ i }}" class="field-overrides-hidden"
+               value='{{ (e.get("fieldOverrides") or {}) | tojson }}'>
       </div>
       {% endfor %}
     </div>
@@ -160,6 +173,8 @@
   const FORMS_DATA = {{ forms | tojson }};
   const ORGS_DATA  = {{ orgs  | tojson }};
 
+  // --- Helpers ---
+
   function escHtml(s) {
     return String(s)
       .replace(/&/g, '&amp;')
@@ -167,6 +182,174 @@
       .replace(/>/g, '&gt;')
       .replace(/"/g, '&quot;');
   }
+
+  const SLACK_TYPE_OPTIONS = [
+    { value: 'plain_text_input',           label: 'Short text' },
+    { value: 'plain_text_input_multiline', label: 'Long text (multiline)' },
+    { value: 'static_select',              label: 'Dropdown' },
+    { value: 'multi_static_select',        label: 'Multi-select' },
+    { value: 'datepicker',                 label: 'Date picker' },
+    { value: 'checkboxes',                 label: 'Checkbox' },
+    { value: 'number_input',               label: 'Number' },
+  ];
+
+  function buildSlackTypeSelect(selectedValue) {
+    const opts = SLACK_TYPE_OPTIONS.map(o => {
+      const sel = o.value === selectedValue ? ' selected' : '';
+      return `<option value="${o.value}"${sel}>${escHtml(o.label)}</option>`;
+    }).join('');
+    return `<select class="fc-slack-type">${opts}</select>`;
+  }
+
+  // --- Field config table rendering ---
+
+  function buildFieldTableHTML(fields, savedOverrides) {
+    const rows = fields.map(f => {
+      const req       = f.required === true;
+      const fieldId   = String(f.id);
+      const override  = savedOverrides[fieldId] || {};
+
+      // Include checkbox — required fields are always checked regardless of any saved override
+      const checked   = (req || override.included !== false) ? ' checked' : '';
+      const disabled  = req ? ' disabled' : '';
+      const reqMark   = req ? '<span class="req">*</span>' : '';
+      const labelText = req
+        ? `<strong>${escHtml(f.label)}${reqMark}</strong>`
+        : escHtml(f.label) + reqMark;
+
+      // Slack type select — prefer saved override, fall back to API default
+      const slackType = override.slackType || f.defaultSlackType || 'plain_text_input';
+      const slackSel  = buildSlackTypeSelect(slackType);
+
+      return `<tr>
+        <td><input type="checkbox" class="fc-include"${checked}${disabled}
+             data-field-id="${escHtml(fieldId)}"
+             data-required="${req}"
+             data-default-slack-type="${escHtml(f.defaultSlackType || 'plain_text_input')}"></td>
+        <td>${labelText}</td>
+        <td><code style="font-size:.78rem;color:#6b7280">${escHtml(f.ninjaType || '')}</code></td>
+        <td>${slackSel}</td>
+      </tr>`;
+    }).join('');
+
+    return `
+      <table>
+        <thead>
+          <tr>
+            <th>Include</th>
+            <th>Field</th>
+            <th>NinjaOne type</th>
+            <th>Slack type</th>
+          </tr>
+        </thead>
+        <tbody>${rows}</tbody>
+      </table>`;
+  }
+
+  // --- Override computation ---
+  // Reads the current state of the field-config-table DOM and writes the
+  // JSON blob back to the hidden field_overrides_* input.
+  // Controls are identified by class only — no name attributes — so renumber
+  // cannot mangle them.
+
+  function recomputeOverrides(row) {
+    const overrides = {};
+    const table = row.querySelector('.field-config-table');
+    if (!table) return;
+
+    table.querySelectorAll('.fc-include').forEach(cb => {
+      const fieldId      = cb.dataset.fieldId;
+      const defaultSlack = cb.dataset.defaultSlackType;
+      const slackSel     = cb.closest('tr').querySelector('.fc-slack-type');
+      const entry        = {};
+
+      if (!cb.checked) {
+        entry.included = false;
+      }
+      if (slackSel && slackSel.value !== defaultSlack) {
+        entry.slackType = slackSel.value;
+      }
+      if (Object.keys(entry).length > 0) {
+        overrides[fieldId] = entry;
+      }
+    });
+
+    const hidden = row.querySelector('[name^="field_overrides_"]');
+    if (hidden) hidden.value = JSON.stringify(overrides);
+  }
+
+  // --- Fetch controller registry (keyed by row element) ---
+
+  const rowAbortControllers = new WeakMap();
+
+  function abortPendingFetch(row) {
+    const ctrl = rowAbortControllers.get(row);
+    if (ctrl) {
+      ctrl.abort();
+      rowAbortControllers.delete(row);
+    }
+  }
+
+  // --- Load field config for a row ---
+
+  async function loadFieldConfig(row, formId, savedOverrides) {
+    abortPendingFetch(row);
+
+    const configDiv = row.querySelector('.field-config-table');
+    const hidden    = row.querySelector('[name^="field_overrides_"]');
+
+    if (!formId) {
+      if (configDiv) configDiv.innerHTML = '';
+      if (hidden)    hidden.value = '{}';
+      return;
+    }
+
+    // Show loading indicator
+    if (configDiv) {
+      configDiv.innerHTML = '<div class="field-config-loading">Loading field configuration…</div>';
+    }
+
+    const ctrl = new AbortController();
+    rowAbortControllers.set(row, ctrl);
+
+    let data;
+    try {
+      const res = await fetch(`/api/form-fields/${encodeURIComponent(formId)}`, {
+        signal: ctrl.signal,
+      });
+      data = await res.json();
+    } catch (err) {
+      if (err.name === 'AbortError') return; // superseded by a newer fetch
+      if (configDiv) {
+        configDiv.innerHTML =
+          '<div class="field-config-loading">Could not load field configuration.</div>';
+      }
+      if (hidden) hidden.value = '{}';
+      return;
+    }
+
+    // Stale-response guard: if the row's form select no longer shows this formId, discard
+    const currentFormSel = row.querySelector('.form-select');
+    if (currentFormSel && currentFormSel.value !== formId) return;
+
+    if (data.error || !data.fields || data.fields.length === 0) {
+      if (configDiv) {
+        configDiv.innerHTML =
+          '<div class="field-config-loading">Could not load field configuration.</div>';
+      }
+      if (hidden) hidden.value = '{}';
+      return;
+    }
+
+    if (configDiv) {
+      configDiv.innerHTML = buildFieldTableHTML(data.fields, savedOverrides);
+    }
+
+    // Compute initial override blob from the just-rendered table
+    recomputeOverrides(row);
+  }
+
+  // --- Entry HTML builder ---
 
   function buildEntryHTML(idx) {
     const formOpts = FORMS_DATA.map(f => {
@@ -191,7 +374,7 @@
       : `<input type="text" placeholder="Could not load organisations from NinjaOne" disabled>`;
 
     return `
-      <div class="entry-row">
+      <div class="entry-row" data-overrides='{}'>
         <div class="entry-header">
           <span class="entry-label" data-entry-num>Form ${idx + 1}</span>
           <button type="button" class="btn btn-danger btn-sm remove-btn">Remove</button>
@@ -205,6 +388,7 @@
             <label>NinjaOne ticket form</label>
             ${formSel}
             <input type="hidden" name="ticket_form_name_${idx}" class="form-name-hidden">
+            <div class="field-config-table"></div>
           </div>
           <div class="form-group">
             <label>Organisation</label>
@@ -216,8 +400,11 @@
             <input type="text" name="default_subject_${idx}" placeholder="[Eng Assist] {Root Problem}">
           </div>
         </div>
+        <input type="hidden" name="field_overrides_${idx}" class="field-overrides-hidden" value="{}">
       </div>`;
   }
+
+  // --- Row utilities ---
 
   function renumberRows() {
     document.querySelectorAll('#entries-container .entry-row').forEach((row, idx) => {
@@ -242,6 +429,8 @@
     });
   }
 
+  // --- Event listeners ---
+
   // Add entry
   document.getElementById('add-entry').addEventListener('click', () => {
     const idx = document.querySelectorAll('#entries-container .entry-row').length;
@@ -255,23 +444,50 @@
   // Remove entry (delegated)
   document.getElementById('entries-container').addEventListener('click', e => {
     if (!e.target.classList.contains('remove-btn')) return;
-    e.target.closest('.entry-row').remove();
+    const row = e.target.closest('.entry-row');
+    abortPendingFetch(row);
+    row.remove();
     renumberRows();
     updateMultiState();
   });
 
-  // Sync hidden name fields (delegated)
+  // Delegated change handler: name sync + field config fetch + override recompute
   document.getElementById('entries-container').addEventListener('change', e => {
     const row = e.target.closest('.entry-row');
     if (!row) return;
+
     if (e.target.classList.contains('form-select')) {
-      const opt = e.target.options[e.target.selectedIndex];
+      const opt    = e.target.options[e.target.selectedIndex];
       row.querySelector('.form-name-hidden').value = opt.dataset.name || '';
+
+      const formId = e.target.value;
+      loadFieldConfig(row, formId, {}); // new user selection — no saved overrides to restore
     }
+
     if (e.target.classList.contains('org-select')) {
       const opt = e.target.options[e.target.selectedIndex];
       row.querySelector('.org-name-hidden').value = opt.dataset.name || '';
     }
+
+    // Field config table controls (fc-include checkboxes, fc-slack-type selects)
+    if (e.target.classList.contains('fc-include') ||
+        e.target.classList.contains('fc-slack-type')) {
+      recomputeOverrides(row);
+    }
+  });
+
+  // --- Page-load restore: fetch fields for rows that already have a form selected ---
+
+  document.querySelectorAll('#entries-container .entry-row').forEach(row => {
+    const formSel = row.querySelector('.form-select');
+    if (!formSel || !formSel.value) return;
+
+    let savedOverrides = {};
+    try {
+      savedOverrides = JSON.parse(row.dataset.overrides || '{}');
+    } catch (_) { /* ignore malformed */ }
+
+    loadFieldConfig(row, formSel.value, savedOverrides);
   });
 </script>
 
